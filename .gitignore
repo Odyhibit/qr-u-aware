@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# iOS
+ios/App/Pods/
+ios/App/Podfile.lock
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# Capacitor
+dist/

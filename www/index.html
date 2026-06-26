@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>QR U Aware Scanner</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d0d0f;
+    color: #e8e8ed;
+    touch-action: manipulation;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────────────────*/
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+    padding-top: env(safe-area-inset-top);
+}
+#portrait-lock-message {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 5000;
+    background: #0d0d0f;
+    color: #e8e8ed;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+}
+.portrait-lock-card {
+    max-width: 320px;
+}
+.portrait-lock-icon {
+    font-size: 42px;
+    line-height: 1;
+    margin-bottom: 14px;
+}
+.portrait-lock-title {
+    font-size: 18px;
+    font-weight: 800;
+    margin-bottom: 8px;
+}
+.portrait-lock-text {
+    font-size: 14px;
+    line-height: 1.45;
+    color: #aaa;
+}
+@media (orientation: landscape) and (max-height: 520px) {
+    #portrait-lock-message { display: flex; }
+}
+.view { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.hidden { display: none !important; }
+
+/* ── Tab bar ───────────────────────────────────────────────────────────────*/
+#tab-bar {
+    display: flex;
+    background: #1a1a1f;
+    border-top: 1px solid #2a2a35;
+    padding-bottom: env(safe-area-inset-bottom);
+}
+.tab-btn {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 0 6px;
+    background: none;
+    border: none;
+    color: #999;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: color 0.2s;
+    gap: 3px;
+    touch-action: manipulation;
+}
+.tab-btn .tab-icon { font-size: 22px; line-height: 1; }
+.tab-active { color: #7c6fff; }
+
+/* ── Scanner view ──────────────────────────────────────────────────────────*/
+#view-scanner {
+    position: relative;
+    background: #000;
+    flex: 1;
+    overflow: hidden;
+}
+#scanner-video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+    opacity: 0;
+    transition: opacity 0.12s ease-out;
+    background: #000;
+}
+#scanner-video.video-ready {
+    opacity: 1;
+}
+#scanner-canvas { display: none; }
+
+/* QR detection highlight canvas — sits directly over video, no pointer events */
+#qr-overlay-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.scanner-tool-btn {
+    position: absolute;
+    right: 16px;
+    top: calc(16px + env(safe-area-inset-top));
+    width: 44px;
+    height: 44px;
+    border: 1px solid rgba(255,255,255,0.22);
+    border-radius: 50%;
+    background: rgba(13,13,15,0.46);
+    color: #e8e8ed;
+    font-size: 20px;
+    font-weight: 800;
+    z-index: 4;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+}
+.scanner-tool-btn.is-active {
+    background: rgba(124,111,255,0.30);
+    border-color: rgba(124,111,255,0.85);
+    color: #fff;
+}
+
+#scanner-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 1;
+}
+.viewfinder {
+    width: 68vw;
+    height: 68vw;
+    max-width: 320px;
+    max-height: 320px;
+    position: relative;
+}
+.vf-corner {
+    position: absolute;
+    width: 24px;
+    height: 24px;
+    border-color: rgba(124,111,255,0.5);
+    border-style: solid;
+    border-width: 0;
+}
+.vf-tl { top: 0; left: 0; border-top-width: 3px; border-left-width: 3px; border-radius: 4px 0 0 0; }
+.vf-tr { top: 0; right: 0; border-top-width: 3px; border-right-width: 3px; border-radius: 0 4px 0 0; }
+.vf-bl { bottom: 0; left: 0; border-bottom-width: 3px; border-left-width: 3px; border-radius: 0 0 0 4px; }
+.vf-br { bottom: 0; right: 0; border-bottom-width: 3px; border-right-width: 3px; border-radius: 0 0 4px 0; }
+.scanner-label {
+    position: absolute;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,0.7);
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+}
+#scanner-error {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d0f;
+    padding: 32px;
+    text-align: center;
+    gap: 12px;
+    z-index: 5;
+}
+#scanner-error-msg { color: #ff6b6b; font-size: 15px; line-height: 1.5; }
+/* ── Result view ───────────────────────────────────────────────────────────*/
+#view-result {
+    display: block;
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    -webkit-overflow-scrolling: touch;
+    background: #0d0d0f;
+    padding: 0 0 env(safe-area-inset-bottom);
+}
+.result-header {
+    padding: 20px 20px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.result-header h2 { font-size: 17px; font-weight: 700; flex: 1; }
+.result-section {
+    flex: 0 0 auto;
+    margin: 16px 16px 0;
+    background: #1a1a1f;
+    border: 1px solid #2a2a35;
+    border-radius: 14px;
+    overflow: hidden;
+}
+.result-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #aaa;
+    padding: 12px 16px 4px;
+    text-transform: uppercase;
+}
+.result-content-text {
+    padding: 10px 16px 14px;
+    font-size: 15px;
+    line-height: 1.5;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    color: #e8e8ed;
+}
+.collapsible-text {
+    overflow: hidden;
+    max-height: none;
+}
+.collapsible-text.is-collapsed {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+}
+.text-toggle {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    color: #7c6fff;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 0 16px 10px;
+    cursor: pointer;
+}
+.redirect-hop .text-toggle { padding: 2px 0 0; }
+.result-actions {
+    flex: 0 0 auto;
+    padding: 14px 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.local-checks {
+    padding: 0 16px 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 7px;
+}
+.local-checks-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #aaa;
+    text-transform: uppercase;
+}
+.risk-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.risk-chip-safe { background: #1a1a1f; color: #999; border: 1px solid #2a2a35; }
+.risk-chip-info { background: #1a1a24; color: #a5a8c7; border: 1px solid #303044; }
+.risk-chip-warn { background: #2a1e0d; color: #ffaa5a; border: 1px solid #4a3a1a; }
+.risk-chip-threat { background: #2a0d0d; color: #ff5a5a; border: 1px solid #4a1a1a; }
+.domain-age {
+    margin: 0 16px 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #111116;
+    border: 1px solid #272733;
+}
+.domain-age.hidden { display: none; }
+.domain-age-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #aaa;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+.domain-age-status {
+    font-size: 13px;
+    color: #c9c9d6;
+    line-height: 1.35;
+}
+.domain-age-status.domain-age-warn { color: #ffaa5a; }
+.domain-age-status.domain-age-danger { color: #ff7474; }
+.domain-age-status.domain-age-muted { color: #8f8f9d; }
+.result-stego-section {
+    margin: 12px 16px 0;
+    background: #141420;
+    border: 1px solid #3a3060;
+    border-radius: 14px;
+    overflow: hidden;
+}
+.stego-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #9988ff;
+    padding: 12px 16px 4px;
+    text-transform: uppercase;
+}
+.stego-row { padding: 6px 16px 12px; }
+.stego-label { font-size: 11px; color: #7c6fff; margin-bottom: 3px; font-weight: 600; }
+.stego-value {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 14px;
+    color: #c8c0ff;
+    word-break: break-all;
+}
+/* ── Raw QR Data accordion ─────────────────────────────────────────────────*/
+.raw-qr-section { margin: 8px 16px 12px; }
+.raw-qr-toggle {
+    width: 100%; background: none; border: 1px solid #2a2a35; border-radius: 8px;
+    color: #8880b0; font-size: 13px; font-weight: 600; padding: 8px 14px;
+    display: flex; justify-content: space-between; align-items: center; cursor: pointer;
+}
+.raw-qr-chevron { transition: transform 0.2s; display: inline-block; }
+.raw-qr-chevron.open { transform: rotate(90deg); }
+.raw-qr-body { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.raw-qr-format {
+    font-size: 12px; color: #999; padding: 6px 10px;
+    background: #1a1a22; border-radius: 6px; letter-spacing: 0.03em;
+}
+.raw-qr-label-row { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; }
+.raw-qr-label { font-size: 10px; color: #7c6fff; font-weight: 700; letter-spacing: 0.08em; }
+.raw-qr-copy-btn {
+    background: none; border: 1px solid #3a3a50; border-radius: 4px;
+    color: #7c6fff; font-size: 10px; padding: 1px 7px; cursor: pointer;
+}
+.raw-qr-hex {
+    font-family: 'SF Mono', 'Menlo', monospace; font-size: 11px; color: #b0aad8;
+    background: #121218; border-radius: 6px; padding: 8px 10px;
+    white-space: pre-wrap; word-break: break-all; line-height: 1.7;
+}
+/* ── History view ──────────────────────────────────────────────────────────*/
+#view-history { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; position: relative; }
+.history-header {
+    position: sticky;
+    top: 0;
+    background: #0d0d0f;
+    padding: 16px 20px 12px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid #2a2a35;
+    z-index: 10;
+}
+.history-header h2 { flex: 1; font-size: 20px; font-weight: 700; }
+.history-list { padding: 12px 0 24px; }
+.history-loading { padding: 20px 16px; color: #aaa; font-size: 13px; }
+.history-empty { text-align: center; padding: 60px 24px; color: #aaa; font-size: 15px; }
+.history-loading-screen {
+    position: absolute;
+    inset: 53px 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d0f;
+    z-index: 6;
+}
+.history-loading-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    color: #aaa;
+    font-size: 14px;
+    font-weight: 600;
+}
+.history-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid #2a2a35;
+    border-top-color: #7c6fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+.history-card {
+    margin: 8px 16px;
+    background: #1a1a1f;
+    border: 1px solid #2a2a35;
+    border-radius: 12px;
+    padding: 14px 16px;
+    cursor: pointer;
+}
+.history-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.history-date { font-size: 12px; color: #999; margin-left: auto; }
+.history-preview { font-size: 14px; color: #aaa; line-height: 1.4; word-break: break-all; margin-bottom: 10px; }
+.history-card-actions { display: flex; gap: 8px; }
+
+/* ── Badges ────────────────────────────────────────────────────────────────*/
+.badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    letter-spacing: 0.05em;
+}
+.badge-url { background: #1a3a5e; color: #5aabff; }
+.badge-text { background: #2a2a35; color: #aaa; }
+.badge-email { background: #1a3a2a; color: #5aff9a; }
+.badge-phone { background: #2a3a1a; color: #aaff5a; }
+.badge-wifi { background: #3a2a1a; color: #ffaa5a; }
+.badge-vcard { background: #3a1a2a; color: #ff5aaa; }
+.badge-sms { background: #1a2a3a; color: #5aaaff; }
+.badge-geo { background: #3a3a1a; color: #ffff5a; }
+.badge-stego { background: #2a1a4a; color: #9a7aff; }
+.badge-safe { background: #0d1f15; color: #5aff8a; }
+.badge-warn { background: #2a1e0d; color: #ffaa5a; }
+.badge-threat { background: #2a0d0d; color: #ff5a5a; }
+.badge-muted { background: #24242c; color: #aaa; }
+
+/* ── Buttons ───────────────────────────────────────────────────────────────*/
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: opacity 0.15s;
+    text-decoration: none;
+}
+.btn:active { opacity: 0.7; }
+.btn-primary { background: #7c6fff; color: #fff; padding: 13px 20px; font-size: 15px; width: 100%; }
+.btn-secondary { background: #2a2a35; color: #e8e8ed; padding: 9px 16px; font-size: 13px; }
+.btn-danger { background: #3a1a1a; color: #ff6b6b; padding: 9px 16px; font-size: 13px; }
+.btn-ghost { background: none; border: 1px solid #2a2a35; color: #aaa; padding: 9px 16px; font-size: 13px; }
+.btn-sm { padding: 7px 12px; font-size: 12px; border-radius: 8px; }
+
+/* ── Settings view ─────────────────────────────────────────────────────────*/
+#view-settings {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    background: #0d0d0f;
+}
+.settings-header {
+    position: sticky;
+    top: 0;
+    background: #0d0d0f;
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid #2a2a35;
+    z-index: 10;
+}
+.settings-header h2 { font-size: 20px; font-weight: 700; }
+.settings-body { padding: 16px 16px 40px; display: flex; flex-direction: column; gap: 20px; }
+.settings-section {
+    background: #1a1a1f;
+    border: 1px solid #2a2a35;
+    border-radius: 14px;
+    overflow: hidden;
+}
+.settings-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: #aaa;
+    padding: 12px 16px 4px;
+    text-transform: uppercase;
+}
+.settings-field { padding: 10px 16px 14px; border-top: 1px solid #1e1e28; }
+.settings-field:first-of-type { border-top: none; }
+.settings-field label { font-size: 13px; font-weight: 600; color: #ccc; display: block; margin-bottom: 8px; }
+.settings-key-row { display: flex; gap: 8px; align-items: center; }
+.settings-key-row input {
+    flex: 1;
+    background: #0d0d0f;
+    border: 1px solid #2a2a35;
+    border-radius: 8px;
+    padding: 9px 12px;
+    color: #e8e8ed;
+    font-size: 14px;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    outline: none;
+    min-width: 0;
+}
+.settings-key-row input:focus { border-color: #7c6fff; }
+.settings-key-row .btn-reveal {
+    background: #2a2a35;
+    border: none;
+    border-radius: 8px;
+    color: #aaa;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 9px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.settings-field-hint { font-size: 12px; color: #aaa; margin-top: 8px; line-height: 1.4; }
+.settings-actions { padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+.settings-divider { height: 1px; background: #2a2a35; margin: 0 16px; }
+.settings-check-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+.settings-check-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-top: 1px;
+    accent-color: #7c6fff;
+    flex-shrink: 0;
+}
+.settings-check-copy { flex: 1; min-width: 0; }
+.settings-check-copy label { margin-bottom: 3px; }
+.settings-check-row input:disabled + .settings-check-copy label { color: #999; }
+
+/* Storage security info */
+.sec-info {
+    display: flex;
+    gap: 12px;
+    padding: 14px 16px;
+    align-items: flex-start;
+}
+.sec-info-icon { font-size: 22px; line-height: 1; flex-shrink: 0; margin-top: 1px; }
+.sec-info-body { flex: 1; }
+.sec-info-body strong { font-size: 14px; color: #e8e8ed; display: block; margin-bottom: 4px; }
+.sec-info-body p { font-size: 12px; line-height: 1.5; }
+.sec-info-strong { background: #0d1f15; border-top: 1px solid #1a4a2a; }
+.sec-info-strong .sec-info-body p { color: #79c99a; }
+.sec-info-soft { background: #151520; border-top: 1px solid #2a2a40; }
+.sec-info-soft .sec-info-body p { color: #aaaabd; }
+
+/* ── Redirect chain & safety badge ────────────────────────────────────────*/
+.redirect-chain { padding: 4px 16px 0; }
+.redirect-hop { display: flex; flex-direction: column; gap: 2px; }
+.redirect-hop-label { font-size: 10px; font-weight: 700; letter-spacing: 0.06em; color: #999; text-transform: uppercase; }
+.redirect-hop-url {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 13px;
+    color: #e8e8ed;
+    word-break: break-all;
+    line-height: 1.4;
+}
+.redirect-hop-url.hop-original { color: #aaa; }
+.redirect-hop .platform-dest-open { align-self: flex-start; margin-top: 5px; }
+.redirect-arrow {
+    font-size: 16px;
+    color: #7c6fff;
+    padding: 4px 0;
+    text-align: center;
+    width: 24px;
+    align-self: flex-start;
+    margin-left: 2px;
+}
+.redirect-hops { display: flex; flex-direction: column; }
+.redirect-loading {
+    padding: 6px 16px 2px;
+}
+.redirect-loading-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.redirect-loading-arrow {
+    width: 24px;
+    height: 16px;
+    margin: 7px 0 7px 2px;
+    border-left: 2px solid #2f2f3a;
+    border-bottom: 2px solid #2f2f3a;
+    transform: skewY(-18deg);
+}
+.redirect-skeleton {
+    display: block;
+    height: 13px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, #24242c 0%, #343442 45%, #24242c 90%);
+    background-size: 220% 100%;
+    animation: shimmer 1.2s ease-in-out infinite;
+}
+.skeleton-wide { width: 92%; }
+.skeleton-medium { width: 68%; }
+@keyframes shimmer {
+    0% { background-position: 120% 0; }
+    100% { background-position: -120% 0; }
+}
+
+.safety-details { padding: 10px 16px 2px; }
+.safety-details-title {
+    font-size: 12px;
+    color: #aaa;
+    font-weight: 700;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+}
+.safety-details-title.safety-detail-safe { color: #5aff8a; }
+.safety-details-title.safety-detail-threat { color: #ff5a5a; }
+.safety-details-title.safety-detail-warn { color: #ffaa5a; }
+.safety-details-title.safety-detail-nokey { color: #aaa; }
+.network-prompt {
+    margin: 12px 16px 0;
+    padding: 14px 16px;
+    background: #15151c;
+    border: 1px solid #2a2a35;
+    border-radius: 12px;
+}
+.network-prompt-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #e8e8ed;
+    margin-bottom: 5px;
+}
+.network-prompt-text {
+    font-size: 12px;
+    color: #aaa;
+    line-height: 1.45;
+    margin-bottom: 10px;
+}
+.network-prompt-actions {
+    padding: 0;
+}
+.network-prompt-home {
+    display: contents;
+}
+.redirect-vt-prompt-host .network-prompt {
+    margin: 10px 0 0;
+}
+.vt-result {
+    padding: 10px 16px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.vt-status {
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.45;
+}
+.vt-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+.vt-stat {
+    background: #101015;
+    border: 1px solid #24242c;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+.vt-stat-label {
+    display: block;
+    color: #aaa;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+.vt-stat-value {
+    color: #e8e8ed;
+    font-size: 16px;
+    font-weight: 800;
+    margin-top: 2px;
+}
+.vt-link { align-self: flex-start; color: #7c6fff; font-size: 12px; font-weight: 700; text-decoration: none; }
+
+/* ── Platform destinations ─────────────────────────────────────────────────*/
+.result-section-title-row {
+    display: flex;
+    align-items: center;
+    padding: 12px 16px 4px;
+    gap: 8px;
+}
+.result-section-title-row .result-section-title { padding: 0; }
+.platform-badge {
+    display: inline-block;
+    background: #1a2a3a;
+    color: #5aabff;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    text-transform: uppercase;
+}
+.platform-dests { padding: 4px 16px 0; display: flex; flex-direction: column; }
+.platform-dest-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 0;
+    border-top: 1px solid #2a2a35;
+}
+.platform-dest-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #7c6fff;
+    text-transform: uppercase;
+    width: 52px;
+    flex-shrink: 0;
+}
+.platform-dest-url {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+    color: #aaa;
+    word-break: break-all;
+    flex: 1;
+    line-height: 1.3;
+}
+.platform-dest-open { flex-shrink: 0; }
+
+/* ── Result mode pill ──────────────────────────────────────────────────────*/
+.result-mode-pill {
+    background: none;
+    border: 1px solid #3a3a4a;
+    border-radius: 20px;
+    color: #999;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 5px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: color 0.15s, border-color 0.15s;
+}
+.result-mode-pill:active { opacity: 0.7; }
+
+/* ── Simple mode ───────────────────────────────────────────────────────────*/
+#view-result.simple-mode .result-section,
+#view-result.simple-mode .result-stego-section,
+#view-result.simple-mode .raw-qr-section { display: none !important; }
+
+.simple-verdict-view { display: none; flex-direction: column; padding: 20px 16px 0; gap: 14px; }
+#view-result.simple-mode .simple-verdict-view { display: flex !important; }
+
+.simple-verdict-card {
+    border-radius: 20px;
+    padding: 36px 24px 28px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    text-align: center;
+}
+.simple-verdict-card.verdict-safe       { background: #071a0f; border: 1px solid #1a4a28; }
+.simple-verdict-card.verdict-caution    { background: #1f1508; border: 1px solid #4a3010; }
+.simple-verdict-card.verdict-danger     { background: #1a0707; border: 1px solid #4a1010; }
+.simple-verdict-card.verdict-neutral    { background: #1a1a1f; border: 1px solid #2a2a35; }
+.simple-verdict-card.verdict-checking   { background: #141418; border: 1px solid #2a2a35; }
+.simple-verdict-card.verdict-unreachable { background: #141418; border: 1px solid #2a2a35; }
+
+.simple-verdict-icon { font-size: 52px; line-height: 1; }
+.verdict-safe        .simple-verdict-icon { color: #5aff8a; }
+.verdict-caution     .simple-verdict-icon { color: #ffaa5a; }
+.verdict-danger      .simple-verdict-icon { color: #ff5a5a; }
+.verdict-neutral     .simple-verdict-icon { color: #888; }
+.verdict-unreachable .simple-verdict-icon { color: #555; }
+.verdict-checking    .simple-verdict-icon {
+    display: block;
+    width: 48px;
+    height: 48px;
+    font-size: 0;
+    border: 4px solid #2a2a35;
+    border-top-color: #7c6fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.simple-verdict-text { font-size: 28px; font-weight: 800; line-height: 1.1; }
+.verdict-safe        .simple-verdict-text { color: #5aff8a; }
+.verdict-caution     .simple-verdict-text { color: #ffaa5a; }
+.verdict-danger      .simple-verdict-text { color: #ff5a5a; }
+.verdict-neutral     .simple-verdict-text { color: #ccc; }
+.verdict-checking    .simple-verdict-text { color: #666; font-size: 20px; font-weight: 600; }
+.verdict-unreachable .simple-verdict-text { color: #777; }
+
+.simple-verdict-sub { font-size: 15px; color: #aaa; line-height: 1.4; word-break: break-all; margin-top: 4px; }
+
+.simple-verdict-reason { border-radius: 10px; padding: 10px 14px; font-size: 14px; color: #ccc; line-height: 1.5; }
+.simple-verdict-reason.reason-caution { background: rgba(255,170,90,0.08); border: 1px solid rgba(255,170,90,0.25); }
+.simple-verdict-reason.reason-danger  { background: rgba(255,90,90,0.08);  border: 1px solid rgba(255,90,90,0.25); }
+
+.simple-actions { display: flex; flex-direction: column; gap: 10px; padding-bottom: 24px; }
+.btn-simple-open { background: #7c6fff; color: #fff; padding: 16px 20px; font-size: 16px; width: 100%; border-radius: 14px; font-weight: 700; }
+.btn-simple-back { background: #1a1a1f; border: 1px solid #2a2a35; color: #aaa; padding: 14px 20px; font-size: 15px; width: 100%; border-radius: 14px; font-weight: 600; }
+
+/* ── Toast ─────────────────────────────────────────────────────────────────*/
+#toast {
+    position: fixed;
+    bottom: calc(80px + env(safe-area-inset-bottom));
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #333;
+    color: #fff;
+    padding: 10px 20px;
+    border-radius: 20px;
+    font-size: 14px;
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 1000;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div id="app">
+
+    <!-- ── Scanner view ─────────────────────────────────────────────────── -->
+    <div id="view-scanner" class="view">
+        <video id="scanner-video" autoplay muted playsinline></video>
+        <canvas id="scanner-canvas"></canvas>
+
+        <!-- QR detection highlight drawn here (pointer-events: none) -->
+        <canvas id="qr-overlay-canvas"></canvas>
+
+        <button id="scanner-torch-btn" class="scanner-tool-btn hidden" type="button" aria-label="Turn flashlight on" aria-pressed="false">⚡</button>
+
+        <div id="scanner-overlay">
+            <div class="viewfinder">
+                <div class="vf-corner vf-tl"></div>
+                <div class="vf-corner vf-tr"></div>
+                <div class="vf-corner vf-bl"></div>
+                <div class="vf-corner vf-br"></div>
+            </div>
+            <div id="scanner-label" class="scanner-label">Point camera at a QR code</div>
+        </div>
+        <div id="scanner-error" class="hidden">
+            <div style="font-size:48px">📷</div>
+            <p id="scanner-error-msg"></p>
+        </div>
+    </div>
+
+    <!-- ── Result view ──────────────────────────────────────────────────── -->
+    <div id="view-result" class="view hidden">
+        <div class="result-header">
+            <h2>Scan Result</h2>
+            <span id="result-type-badge" class="badge">TEXT</span>
+            <button id="result-mode-pill" class="result-mode-pill" onclick="toggleResultMode()">Details &#x203A;</button>
+        </div>
+
+        <!-- Simple mode verdict card -->
+        <div class="simple-verdict-view">
+            <div id="simple-verdict-card" class="simple-verdict-card verdict-neutral">
+                <div id="simple-verdict-icon" class="simple-verdict-icon">&#x25CB;</div>
+                <div id="simple-verdict-text" class="simple-verdict-text">Scanning&hellip;</div>
+                <div id="simple-verdict-sub" class="simple-verdict-sub"></div>
+            </div>
+            <div id="simple-verdict-reason" class="simple-verdict-reason hidden"></div>
+            <div class="simple-actions">
+                <button id="simple-open-btn" class="btn btn-simple-open hidden" onclick="simpleOpenUrl()">Open</button>
+                <button class="btn btn-simple-back" onclick="showView('scanner')">Scan Another</button>
+            </div>
+        </div>
+
+        <div id="result-content-section" class="result-section">
+            <div class="result-section-title">Content</div>
+            <div id="result-content" class="result-content-text"></div>
+            <div class="result-actions">
+                <button class="btn btn-ghost btn-sm" onclick="copyContent()">Copy</button>
+                <button id="result-copy-report" class="btn btn-ghost btn-sm" onclick="copyReport()">Copy Report</button>
+                <button id="result-open-url" class="btn btn-secondary btn-sm hidden" onclick="">Open URL</button>
+            </div>
+            <div id="result-local-checks" class="local-checks hidden"></div>
+            <div id="result-domain-age" class="domain-age hidden">
+                <div class="domain-age-title">Domain age</div>
+                <div id="result-domain-age-status" class="domain-age-status"></div>
+            </div>
+            <div id="result-safety-details-home"></div>
+            <div id="result-network-prompt-home" class="network-prompt-home">
+                <div id="result-network-prompt" class="network-prompt hidden">
+                    <div id="result-network-prompt-title" class="network-prompt-title"></div>
+                    <div id="result-network-prompt-text" class="network-prompt-text"></div>
+                    <div class="result-actions network-prompt-actions">
+                        <button id="result-network-prompt-btn" class="btn btn-secondary btn-sm"></button>
+                        <button id="result-network-prompt-skip" class="btn btn-ghost btn-sm hidden">Skip</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Redirect chain (shown after automatic resolution) -->
+        <div id="result-resolved-section" class="result-section hidden">
+            <div class="result-section-title-row">
+                <div class="result-section-title">Redirect Chain</div>
+                <span id="result-platform-badge" class="platform-badge hidden"></span>
+            </div>
+            <div id="result-redirect-chain" class="redirect-chain">
+                <div id="result-redirect-hops" class="redirect-hops">
+                    <div id="result-resolved-vt-prompt-host" class="redirect-vt-prompt-host"></div>
+                </div>
+            </div>
+            <div id="result-redirect-loading" class="redirect-loading hidden">
+                <div class="redirect-loading-row">
+                    <span class="redirect-hop-label">QR URL</span>
+                    <span class="redirect-skeleton skeleton-wide"></span>
+                </div>
+                <div class="redirect-loading-arrow"></div>
+                <div class="redirect-loading-row">
+                    <span class="redirect-hop-label">Destination</span>
+                    <span class="redirect-skeleton skeleton-medium"></span>
+                </div>
+            </div>
+            <div id="result-safety-details-redirect-host">
+                <div id="result-safety-details" class="safety-details hidden">
+                    <div id="result-safety-details-title" class="safety-details-title">Google Safe Browsing</div>
+                    <div id="result-safety-detail-list"></div>
+                </div>
+            </div>
+            <div id="result-dest-local-checks" class="local-checks hidden"></div>
+            <div class="result-actions">
+                <button class="btn btn-ghost btn-sm" onclick="copyResolved()">Copy</button>
+                <button id="result-open-resolved" class="btn btn-secondary btn-sm">Open</button>
+            </div>
+        </div>
+
+        <div id="result-vt-section" class="result-section hidden">
+            <div class="result-section-title">VirusTotal</div>
+            <div class="vt-result">
+                <div id="result-vt-status" class="vt-status"></div>
+                <div id="result-vt-stats" class="vt-stats hidden">
+                    <div class="vt-stat">
+                        <span class="vt-stat-label">Malicious</span>
+                        <span id="result-vt-malicious" class="vt-stat-value">0</span>
+                    </div>
+                    <div class="vt-stat">
+                        <span class="vt-stat-label">Suspicious</span>
+                        <span id="result-vt-suspicious" class="vt-stat-value">0</span>
+                    </div>
+                    <div class="vt-stat">
+                        <span class="vt-stat-label">Harmless</span>
+                        <span id="result-vt-harmless" class="vt-stat-value">0</span>
+                    </div>
+                    <div class="vt-stat">
+                        <span class="vt-stat-label">Undetected</span>
+                        <span id="result-vt-undetected" class="vt-stat-value">0</span>
+                    </div>
+                </div>
+                <a id="result-vt-link" class="vt-link hidden" target="_blank" rel="noopener">Open VirusTotal report</a>
+            </div>
+        </div>
+
+        <!-- Stego secrets (only shown when found) -->
+        <div id="result-stego" class="result-stego-section hidden">
+            <div class="stego-title">Hidden Data Detected</div>
+            <div id="result-pad-secret-row" class="stego-row hidden">
+                <div class="stego-label">Padding Secret</div>
+                <div id="result-pad-secret" class="stego-value"></div>
+            </div>
+            <div id="result-ecc-secret-row" class="stego-row hidden">
+                <div class="stego-label">ECC Secret</div>
+                <div id="result-ecc-secret" class="stego-value"></div>
+            </div>
+        </div>
+
+        <!-- Raw QR Data accordion (live scan only) -->
+        <div id="raw-qr-section" class="raw-qr-section hidden">
+            <button class="raw-qr-toggle" onclick="toggleRawQrData()" id="raw-qr-toggle-btn">
+                Raw QR Data <span id="raw-qr-chevron" class="raw-qr-chevron">&#x276F;</span>
+            </button>
+            <div id="raw-qr-body" class="raw-qr-body hidden">
+                <div id="raw-qr-format" class="raw-qr-format"></div>
+                <div id="raw-qr-counts" class="raw-qr-format"></div>
+                <div class="raw-qr-label-row"><span class="raw-qr-label">DATA</span><button class="raw-qr-copy-btn" onclick="copyHexBlock('raw-qr-data')">Copy</button></div>
+                <div id="raw-qr-data" class="raw-qr-hex"></div>
+                <div class="raw-qr-label-row"><span class="raw-qr-label">ECC</span><button class="raw-qr-copy-btn" onclick="copyHexBlock('raw-qr-ecc')">Copy</button></div>
+                <div id="raw-qr-ecc" class="raw-qr-hex"></div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- ── History view ─────────────────────────────────────────────────── -->
+    <div id="view-history" class="view hidden">
+        <div class="history-header">
+            <h2>History</h2>
+            <button class="btn btn-ghost btn-sm" onclick="clearHistory()">Clear All</button>
+        </div>
+        <div id="history-loading-screen" class="history-loading-screen hidden">
+            <div class="history-loading-box">
+                <div class="history-spinner"></div>
+                <div>Loading history…</div>
+            </div>
+        </div>
+        <div class="history-list" id="history-list"></div>
+        <p id="history-empty" class="history-empty hidden">No scans yet</p>
+    </div>
+
+    <!-- ── Settings view ─────────────────────────────────────────────────── -->
+    <div id="view-settings" class="view hidden">
+        <div class="settings-header">
+            <h2>Settings</h2>
+        </div>
+        <div class="settings-body">
+
+            <!-- Display mode -->
+            <div class="settings-section">
+                <div class="settings-section-title">Display</div>
+                <div class="settings-field">
+                    <div class="settings-check-row">
+                        <input type="checkbox" id="setting-advanced-mode">
+                        <div class="settings-check-copy">
+                            <label for="setting-advanced-mode">Advanced Mode</label>
+                            <p class="settings-field-hint">Shows the full scan report — redirect chain, raw URL, and technical details. Simple Mode (the default) gives a clear safe / caution / danger verdict.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="settings-section">
+                <div class="settings-section-title">Online Checks</div>
+
+                <div class="settings-field">
+                    <div class="settings-check-row">
+                        <input type="checkbox" id="setting-auto-redirects">
+                        <div class="settings-check-copy">
+                            <label for="setting-auto-redirects">Automatically resolve redirects</label>
+                            <p class="settings-field-hint">Follows URL redirects after a scan. This can contact the scanned site or link shortener.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-field">
+                    <div class="settings-check-row">
+                        <input type="checkbox" id="setting-auto-gsb">
+                        <div class="settings-check-copy">
+                            <label for="setting-auto-gsb">Automatically check Google Safe Browsing</label>
+                            <p id="setting-auto-gsb-hint" class="settings-field-hint">Set a Google Safe Browsing API key before enabling automatic checks.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-field">
+                    <div class="settings-check-row">
+                        <input type="checkbox" id="setting-auto-domain-age">
+                        <div class="settings-check-copy">
+                            <label for="setting-auto-domain-age">Automatically check domain age</label>
+                            <p class="settings-field-hint">Looks up only the domain registration date, not the full URL. Useful for detecting newly registered phishing domains.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-field">
+                    <div class="settings-check-row">
+                        <input type="checkbox" id="setting-auto-vt">
+                        <div class="settings-check-copy">
+                            <label for="setting-auto-vt">Automatically scan with VirusTotal</label>
+                            <p id="setting-auto-vt-hint" class="settings-field-hint">Save a VirusTotal API key before enabling automatic VirusTotal scans.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Storage security transparency -->
+            <div class="settings-section">
+                <div class="settings-section-title">Key Storage</div>
+                <div id="storage-security-info"></div>
+            </div>
+
+            <!-- API Keys -->
+            <div class="settings-section">
+                <div class="settings-section-title">API Keys</div>
+
+                <div class="settings-field">
+                    <label for="setting-gsb-key">Google Safe Browsing</label>
+                    <div class="settings-key-row">
+                        <input type="password" id="setting-gsb-key"
+                            placeholder="API key…"
+                            autocomplete="off" autocorrect="off"
+                            autocapitalize="none" spellcheck="false">
+                        <button class="btn-reveal"
+                            onclick="toggleKeyVisibility('setting-gsb-key', this)">Show</button>
+                    </div>
+                    <p class="settings-field-hint">Required for malware and phishing checks. Free keys available at <strong>console.cloud.google.com</strong> — enable the Safe Browsing API and restrict the key to your app.</p>
+                </div>
+
+                <div class="settings-field">
+                    <label for="setting-vt-key">VirusTotal</label>
+                    <div class="settings-key-row">
+                        <input type="password" id="setting-vt-key"
+                            placeholder="64-character hex key…"
+                            autocomplete="off" autocorrect="off"
+                            autocapitalize="none" spellcheck="false">
+                        <button class="btn-reveal"
+                            onclick="toggleKeyVisibility('setting-vt-key', this)">Show</button>
+                    </div>
+                    <p class="settings-field-hint">Enables the VirusTotal deep-scan button. Free keys available at <strong>virustotal.com/gui/join-us</strong>.</p>
+                </div>
+
+                <div class="settings-actions">
+                    <button id="settings-save-btn" class="btn btn-primary" onclick="saveApiKeys()">Save Settings</button>
+                    <button class="btn btn-danger" onclick="clearGsbKey()">Clear GSB Key</button>
+                    <button class="btn btn-danger" onclick="clearApiKeys()">Clear VirusTotal Key</button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- ── Tab bar ──────────────────────────────────────────────────────── -->
+    <nav id="tab-bar">
+        <button id="tab-scanner" class="tab-btn tab-active" onclick="showView('scanner')">
+            <span class="tab-icon">&#x25A0;</span>
+            Scanner
+        </button>
+        <button id="tab-history" class="tab-btn" onclick="showView('history')">
+            <span class="tab-icon">&#x1F550;</span>
+            History
+        </button>
+        <button id="tab-settings" class="tab-btn" onclick="showView('settings')">
+            <span class="tab-icon">&#x2699;</span>
+            Settings
+        </button>
+    </nav>
+
+</div>
+
+<div id="portrait-lock-message" aria-live="polite">
+    <div class="portrait-lock-card">
+        <div class="portrait-lock-icon">&#x21BB;</div>
+        <div class="portrait-lock-title">Portrait Mode Required</div>
+        <div class="portrait-lock-text">Rotate your device upright to continue scanning.</div>
+    </div>
+</div>
+
+<div id="toast" class="hidden"></div>
+
+<!-- QR parsing and stego libs (copied from docs/js/) -->
+<script src="js/qrcodegen.js"></script>
+<script src="js/qr-parser.js?v=3"></script>
+<script src="js/stego.js?v=7"></script>
+
+<!-- ZXing QR detection library -->
+<script src="js/zxing.min.js"></script>
+
+<!-- App scripts -->
+<script src="js/config.js"></script>
+<script src="js/db.js"></script>
+<script src="js/scanner.js"></script>
+<script src="js/secure-keys.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

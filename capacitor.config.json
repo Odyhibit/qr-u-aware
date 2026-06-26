@@ -1,0 +1,16 @@
+{
+  "appId": "com.odyhibit.qruaware",
+  "appName": "QR U Aware",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  },
+  "plugins": {
+    "Camera": {
+      "presentationStyle": "fullscreen"
+    },
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

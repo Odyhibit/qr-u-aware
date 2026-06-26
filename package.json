@@ -1,0 +1,22 @@
+{
+  "name": "qr-stego-scanner",
+  "version": "1.0.0",
+  "description": "QR code scanner with steganography detection",
+  "main": "index.js",
+  "scripts": {
+    "sync": "npx cap sync",
+    "build:ios": "npx cap open ios",
+    "build:android": "npx cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^5.7.0",
+    "@capacitor/app": "^5.0.7",
+    "@capacitor/core": "^5.7.0",
+    "@capacitor/ios": "^5.7.0",
+    "capacitor-secure-storage-plugin": "^0.9.0",
+    "@zxing/library": "^0.21.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^5.7.0"
+  }
+}

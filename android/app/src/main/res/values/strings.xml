@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">QR U Aware</string>
+    <string name="title_activity_main">QR U Aware</string>
+    <string name="package_name">com.odyhibit.qruaware</string>
+    <string name="custom_url_scheme">com.odyhibit.qruaware</string>
+</resources>
