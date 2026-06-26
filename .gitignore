@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Local secrets — contains real API keys, never committed
+www/js/secrets.js
+
 # macOS
 .DS_Store
 

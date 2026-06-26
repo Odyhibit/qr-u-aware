@@ -18,10 +18,12 @@ function saveAdvancedMode(value) {
 
 async function initSettings() {
     _updateStorageNote();
-    const [gsb, vt] = await Promise.all([SecureKeys.get(_KEY_GSB), SecureKeys.get(_KEY_VT)]);
-    if (gsb) document.getElementById('setting-gsb-key').value = gsb;
-    if (vt)  document.getElementById('setting-vt-key').value  = vt;
-    _loadNetworkPreferences(Boolean(gsb), Boolean(vt));
+    const [gsbKey, storedGsb, vt] = await Promise.all([
+        getGsbApiKey(), SecureKeys.get(_KEY_GSB), SecureKeys.get(_KEY_VT)
+    ]);
+    if (storedGsb) document.getElementById('setting-gsb-key').value = storedGsb;
+    if (vt)        document.getElementById('setting-vt-key').value  = vt;
+    _loadNetworkPreferences(Boolean(gsbKey), Boolean(vt));
     _bindGsbKeyAvailability();
     _bindVtKeyAvailability();
     _loadAdvancedMode();
