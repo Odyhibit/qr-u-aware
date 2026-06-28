@@ -294,6 +294,84 @@ const QRParser = {
         );
     },
 
+    /**
+     * Returns true if the module grid has inverted polarity (light/dark swapped),
+     * as happens with raised-metal or etched QR codes where the "dark" module
+     * reflects more light than the background.
+     *
+     * Checks the three finder-pattern corners in both polarities; whichever
+     * polarity gives a lower total mismatch score is the correct one.
+     * Only called BEFORE detectRotation so rotation is resolved on correct polarity.
+     */
+    isInverted(modules) {
+        const size = modules.length;
+        if (size < 21) return false;
+        const FINDER = [
+            [1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1]
+        ];
+        const s = size - 1;
+        const score = (r0, c0, dr, dc, inv) => {
+            let m = 0;
+            for (let r = 0; r < 7; r++)
+                for (let c = 0; c < 7; c++) {
+                    const mod = ((modules[r0 + r*dr]?.[c0 + c*dc]) ? 1 : 0) ^ (inv ? 1 : 0);
+                    if (mod !== FINDER[r][c]) m++;
+                }
+            return m;
+        };
+        const normal   = score(0,0,1,1,false) + score(0,s,1,-1,false) + score(s,0,-1,1,false);
+        const inverted = score(0,0,1,1,true)  + score(0,s,1,-1,true)  + score(s,0,-1,1,true);
+        return inverted < normal;
+    },
+
+    /**
+     * Determine how many 90° CW rotations are needed to bring modules into
+     * standard QR orientation (finder patterns at TL, TR, BL; empty at BR).
+     *
+     * Call isInverted() and correct polarity BEFORE calling this, so the
+     * finder pattern scores are reliable. Returns 0, 1, 2, or 3.
+     */
+    detectRotation(modules) {
+        const size = modules.length;
+        if (size < 21) return 0;
+
+        const FINDER = [
+            [1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1]
+        ];
+        const s = size - 1;
+
+        const score = (r0, c0, dr, dc) => {
+            let m = 0;
+            for (let r = 0; r < 7; r++)
+                for (let c = 0; c < 7; c++)
+                    if (((modules[r0 + r*dr]?.[c0 + c*dc]) ? 1 : 0) !== FINDER[r][c]) m++;
+            return m;
+        };
+
+        const tl = score(0, 0,  1,  1);
+        const tr = score(0, s,  1, -1);
+        const bl = score(s, 0, -1,  1);
+        const br = score(s, s, -1, -1);
+
+        const worst = Math.max(tl, tr, bl, br);
+        if (br === worst) return 0;
+        if (bl === worst) return 3;
+        if (tl === worst) return 2;
+        return 1; // tr is worst
+    },
+
     moduleTransforms(modules) {
         const rotate90 = (m) => {
             const size = m.length;

@@ -35,6 +35,11 @@ async function saveScan(scan) {
             mask_pattern: scan.maskPattern,
             pad_secret: scan.padSecret || null,
             ecc_secret: scan.eccSecret || null,
+            errors_found: scan.errorsFound ?? null,
+            codewords: (scan.dataCodewords?.length || scan.eccCodewords?.length)
+                ? [...(scan.dataCodewords || []), ...(scan.eccCodewords || [])]
+                : null,
+            data_count: scan.dataCodewords?.length || null,
             final_url: scan.finalUrl || null,
             local_risk_level: scan.localRiskLevel || null,
             google_verdict: scan.googleVerdict || null,

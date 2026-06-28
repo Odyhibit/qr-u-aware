@@ -22,6 +22,11 @@ const _SHORT_LINK_HOSTS = new Set([
     'bit.ly', 'tinyurl.com', 't.co', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly',
     'rebrand.ly', 'cutt.ly', 'shorturl.at', 'scanned.page', 'view.page', 'qrco.de',
     'qr-codes.io', 'qr.w69b.com',  // Uniqode (formerly Beaconstac/w69b) dynamic QR platform
+    'qr1.be',                       // QR Tiger dynamic QR platform
+    'l.ead.me',                     // QR Code Generator (qr-code-generator.com)
+    'go.adobe.io',                  // Adobe Express (tracking-enabled QR codes)
+    'flowsto.com', 'flow2.it',      // Flowcode dynamic QR platform
+    'hov.to', 'hovqr.co',          // Hovercode dynamic QR platform
     'mondlz.com',  // Mondelez International (Oreo, Ritz, Cadbury packaging QR codes)
     'costco.ms',   // Costco (HTTP-only shortener domain, redirects to costco.com)
 ]);
@@ -225,9 +230,25 @@ function toggleResultMode() {
     _applyResultViewMode();
 }
 
+function _simpleContentSub(scan) {
+    const c = scan.content || '';
+    let sub;
+    switch (scan.contentType) {
+        case 'email': sub = c.replace(/^mailto:/i, '').split('?')[0]; break;
+        case 'phone': sub = c.replace(/^tel:/i, ''); break;
+        case 'sms':   sub = c.replace(/^s(?:ms(?:to)?|msto):/i, '').split(/[?:]/)[0]; break;
+        case 'wifi':  { const m = c.match(/S:([^;]+)/); sub = m ? m[1] : c; break; }
+        case 'vcard': { const m = c.match(/FN:([^\r\n]+)/); sub = m ? m[1].trim() : null; break; }
+        case 'geo':   { const m = c.match(/^geo:([0-9.,\-]+)/i); sub = m ? m[1] : c; break; }
+        default:      sub = c;
+    }
+    if (!sub) return null;
+    return sub.length > 55 ? sub.slice(0, 52) + '…' : sub;
+}
+
 function _computeSimpleVerdict(scan) {
     if (scan.contentType !== 'url') {
-        return { level: 'neutral', icon: '○', text: _contentTypeLabel(scan.contentType), sub: null };
+        return { level: 'neutral', icon: '○', text: _contentTypeLabel(scan.contentType), sub: _simpleContentSub(scan) };
     }
 
     if (_safetyCheckState === 'checking') {
@@ -1921,6 +1942,9 @@ async function viewHistoryScan(id) {
             domainAgeVerdict: scan.domain_age_verdict,
             domainAgeLevel: scan.domain_age_level,
             vtVerdict: scan.vt_verdict,
+            errorsFound: scan.errors_found ?? null,
+            dataCodewords: (scan.codewords || []).slice(0, scan.data_count || 0),
+            eccCodewords:  (scan.codewords || []).slice(scan.data_count || 0),
             savedId: scan.id
         };
         renderResult(_lastScan);
@@ -1976,10 +2000,9 @@ function renderRawQrData(scan) {
     const section = document.getElementById('raw-qr-section');
     if (!section) return;
 
-    // Only show on live scans — history entries don't have dataCodewords in the DB
-    const isLive = (scan.dataCodewords?.length > 0) || (scan.eccCodewords?.length > 0);
-    section.classList.toggle('hidden', !isLive);
-    if (!isLive) return;
+    const hasData = (scan.dataCodewords?.length > 0) || (scan.eccCodewords?.length > 0);
+    section.classList.toggle('hidden', !hasData);
+    if (!hasData) return;
 
     // Collapse accordion whenever a new scan arrives
     const body = document.getElementById('raw-qr-body');

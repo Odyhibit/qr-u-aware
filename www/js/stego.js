@@ -918,7 +918,21 @@ const QRStego = {
                 } catch (_) { /* leave rawDataStream null */ }
             }
             if (rawDataStream && qrData.version && qrData.eccLevel) {
-                const blockInfo = computeBlockInfo(qrData.version, qrData.eccLevel);
+                // Prefer the blockInfo whose dataCodewords matches rawDataStream.length —
+                // ZXing's parse of format info is more reliable than ours (it uses BCH
+                // error correction), so rawDataStream.length is the authoritative ECC-level
+                // indicator when our parseBest disagrees (e.g. polished/inverted QR coins).
+                let blockInfo = computeBlockInfo(qrData.version, qrData.eccLevel);
+                if (blockInfo.dataCodewords !== rawDataStream.length) {
+                    for (const lvl of ['L', 'M', 'Q', 'H']) {
+                        const bi = computeBlockInfo(qrData.version, lvl);
+                        if (bi.dataCodewords === rawDataStream.length) {
+                            blockInfo = bi;
+                            result.eccLevel = lvl;
+                            break;
+                        }
+                    }
+                }
 
                 // ZXing's BitMatrixParser.readCodewords() unmasks the bitMatrix in-place before
                 // reading, so bitMatrix.get() already returns unmasked bit values by the time
@@ -934,7 +948,14 @@ const QRStego = {
                 const bits = QRParser.extractDataBits(bmTrimmed, qrData.version, 8);
                 const totalCW = blockInfo.dataCodewords + blockInfo.eccPerBlock * blockInfo.totalBlocks;
                 const physicalCW = QRParser.bitsToBytes(bits).slice(0, totalCW);
-                result.errorsFound = countQrErrors(physicalCW, rawDataStream, blockInfo);
+                // ZXing sometimes decodes via InvertedLuminanceSource (light-on-dark QR codes),
+                // which causes every data bit in lastBits to be flipped after in-place unmasking.
+                // Try both polarities and take the lower error count — the coin QR case gives 0
+                // errors on the inverted attempt; a normal QR gives 0 on the normal attempt.
+                const errN = countQrErrors(physicalCW, rawDataStream, blockInfo);
+                const errI = countQrErrors(physicalCW.map(b => (~b) & 0xFF), rawDataStream, blockInfo);
+                result.errorsFound = (errN !== null && errI !== null) ? Math.min(errN, errI)
+                    : errN ?? errI;
             }
         } catch (e) {
             result.errorsFound = null;
