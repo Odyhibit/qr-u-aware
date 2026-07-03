@@ -85,12 +85,13 @@ async function startCamera() {
 
 // ── QR detected ─────────────────────────────────────────────────────────────
 
-async function onQRDetected(rawText, bitMatrix, rawBytes, debugSnap) {
+async function onQRDetected(rawText, bitMatrix, rawBytes, debugSnap, rawModules = null) {
     let stegoResult = { version: '?', eccLevel: '?', maskPattern: '?', padSecret: null, eccSecret: null, errorsFound: null, dataCodewords: [], eccCodewords: [], paddingOffset: 0 };
     try {
         const decoded = await QRStego.decode({
             bitMatrix,
             rawBytes,
+            rawModules,
             expectedText: rawText,
             extractPadding: true,
             extractECC: true,
@@ -2018,10 +2019,7 @@ function _populateRawQrPanels(scan) {
     const data = scan.dataCodewords || [];
     const ecc  = scan.eccCodewords  || [];
 
-    const errText = scan.errorsFound === null ? 'N/A' : String(scan.errorsFound);
-    const errLabel = scan.errorsFound === null
-        ? 'damaged codewords: N/A'
-        : `${errText} damaged codeword${scan.errorsFound === 1 ? '' : 's'}`;
+    const errLabel = `errors ${scan.errorsFound === null ? 'N/A' : scan.errorsFound}`;
     document.getElementById('raw-qr-format').textContent =
         `Version ${scan.version}  ·  ECC ${scan.eccLevel}  ·  Mask ${scan.maskPattern}  ·  ${errLabel}`;
     document.getElementById('raw-qr-counts').textContent =

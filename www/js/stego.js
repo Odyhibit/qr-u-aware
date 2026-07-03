@@ -3,10 +3,8 @@
 // Hides a message in ECC bytes by solving for padding values that produce
 // the desired ECC output. The QR is 100% valid — no bytes are overwritten.
 
-// ── Reed-Solomon encoder for ECC difference counting ─────────────────────────
+// ── Reed-Solomon helpers for ECC validation/error counting ───────────────────
 // GF(256) with primitive polynomial 0x011D (same field used by QR codes).
-// We re-encode each data block and compare the computed ECC to the stored ECC.
-// Differing bytes = ECC bytes that were modified from what the data produces.
 
 const _gfExp = new Uint8Array(512); // 512 so we never wrap in multiply
 const _gfLog = new Uint8Array(256);
@@ -21,6 +19,11 @@ const _gfLog = new Uint8Array(256);
 
 function _gfMul(a, b) {
     return (a === 0 || b === 0) ? 0 : _gfExp[_gfLog[a] + _gfLog[b]];
+}
+
+function _gfDiv(a, b) {
+    if (b === 0) throw new Error('GF division by zero');
+    return a === 0 ? 0 : _gfExp[(_gfLog[a] - _gfLog[b] + 255) % 255];
 }
 
 // Build the RS generator polynomial g(x) = prod((x + α^i) for i=0..eccLen-1)
@@ -133,67 +136,105 @@ function _buildCleanDataCodewords(msgBytes, version, totalDataBytes, eciDesignat
     return out;
 }
 
-// Count codewords (data + ECC) that differ from the correctly-decoded content.
-// rawDataStream = ZXing's corrected data bytes in physical/interleaved order
-// (same order the QR zigzag produces before block deinterleaving).
-// dataCodewords from QRParser is already deinterleaved into block order, so we
-// must deinterleave rawDataStream to match before comparing byte-by-byte.
-// physicalCW: raw codeword bytes in QR zigzag order (data then ECC, all interleaved)
-// rawDataStream: ZXing-corrected data in sequential (block-contiguous) order:
-//   Block0[0..n0-1], Block1[0..n1-1], ...  (the encoded bit stream, NOT interleaved)
-// blockInfo: from computeBlockInfo — { dataCodewords, totalBlocks, eccPerBlock, dataBlockLens }
-function countQrErrors(physicalCW, rawDataStream, blockInfo) {
-    if (!physicalCW?.length || !rawDataStream?.length || !blockInfo) return null;
+function countEccMismatches(dataCodewords, eccCodewords, blockInfo) {
+    if (!dataCodewords?.length || !eccCodewords?.length || !blockInfo) return null;
 
-    const { dataCodewords: totalData, totalBlocks, eccPerBlock, dataBlockLens } = blockInfo;
+    let dataOff = 0;
+    let eccOff = 0;
+    let mismatches = 0;
 
-    // Split rawDataStream sequentially into per-block arrays.
-    // rawDataStream is the encoded bit stream: Block0 bytes come first, then Block1, etc.
-    const blockData = [];
-    let seqOff = 0;
-    for (const dLen of dataBlockLens) {
-        blockData.push(rawDataStream.slice(seqOff, seqOff + dLen));
-        seqOff += dLen;
+    for (const dLen of blockInfo.dataBlockLens) {
+        const dataBlock = dataCodewords.slice(dataOff, dataOff + dLen);
+        const expectedEcc = _computeEcc(new Uint8Array(dataBlock), blockInfo.eccPerBlock);
+        for (let i = 0; i < blockInfo.eccPerBlock; i++) {
+            if (eccCodewords[eccOff + i] !== expectedEcc[i]) mismatches++;
+        }
+        dataOff += dLen;
+        eccOff += blockInfo.eccPerBlock;
     }
 
-    const shortLen = dataBlockLens[0];
-    const numShort = dataBlockLens.filter(l => l === shortLen).length;
-    const numLong  = totalBlocks - numShort;
+    return mismatches;
+}
 
-    let errors = 0;
+function _rsSyndromes(codewords, eccLen) {
+    const syndromes = [];
+    for (let i = 0; i < eccLen; i++) {
+        const x = _gfExp[i];
+        let y = 0;
+        for (const b of codewords) {
+            y = _gfMul(y, x) ^ b;
+        }
+        syndromes.push(y);
+    }
+    return syndromes;
+}
 
-    // Data comparison: re-interleave blockData to physical order, compare against physicalCW.
-    // Phase 1: first shortLen bytes of every block, round-robin across all blocks
-    let physPos = 0;
-    for (let i = 0; i < shortLen; i++) {
-        for (let b = 0; b < totalBlocks; b++) {
-            if (physPos < physicalCW.length) {
-                if (physicalCW[physPos] !== blockData[b][i]) errors++;
-                physPos++;
-            }
+function _trimPoly(poly) {
+    while (poly.length > 1 && poly[poly.length - 1] === 0) poly.pop();
+    return poly;
+}
+
+function _rsErrorCountForBlock(dataBlock, eccBlock, eccLen) {
+    const syndromes = _rsSyndromes([...dataBlock, ...eccBlock], eccLen);
+    if (syndromes.every(v => v === 0)) return 0;
+
+    // Berlekamp-Massey over GF(256). The degree of the locator polynomial is
+    // the number of corrupted codeword locations when errors are correctable.
+    let c = [1];
+    let b = [1];
+    let l = 0;
+    let m = 1;
+    let bb = 1;
+
+    for (let n = 0; n < eccLen; n++) {
+        let d = syndromes[n];
+        for (let i = 1; i <= l; i++) {
+            d ^= _gfMul(c[i] || 0, syndromes[n - i]);
+        }
+
+        if (d === 0) {
+            m++;
+            continue;
+        }
+
+        const t = c.slice();
+        const coef = _gfDiv(d, bb);
+        for (let i = 0; i < b.length; i++) {
+            c[i + m] = (c[i + m] || 0) ^ _gfMul(coef, b[i]);
+        }
+
+        if (2 * l <= n) {
+            l = n + 1 - l;
+            b = t;
+            bb = d;
+            m = 1;
+        } else {
+            m++;
         }
     }
-    // Phase 2: the extra byte of each long block (long blocks only)
-    if (numLong > 0) {
-        for (let b = numShort; b < totalBlocks; b++) {
-            if (physPos < physicalCW.length) {
-                if (physicalCW[physPos] !== blockData[b][shortLen]) errors++;
-                physPos++;
-            }
-        }
+
+    _trimPoly(c);
+    return l <= Math.floor(eccLen / 2) ? l : null;
+}
+
+function countCorrectableCodewordErrors(dataCodewords, eccCodewords, blockInfo) {
+    if (!dataCodewords?.length || !eccCodewords?.length || !blockInfo) return null;
+
+    let dataOff = 0;
+    let eccOff = 0;
+    let total = 0;
+
+    for (const dLen of blockInfo.dataBlockLens) {
+        const dataBlock = dataCodewords.slice(dataOff, dataOff + dLen);
+        const eccBlock = eccCodewords.slice(eccOff, eccOff + blockInfo.eccPerBlock);
+        const count = _rsErrorCountForBlock(dataBlock, eccBlock, blockInfo.eccPerBlock);
+        if (count === null) return null;
+        total += count;
+        dataOff += dLen;
+        eccOff += blockInfo.eccPerBlock;
     }
 
-    // ECC comparison: compute correct ECC per block, compare against physical ECC positions.
-    // ECC is always interleaved round-robin: physical[totalData + j*totalBlocks + b] = ecc_b[j]
-    for (let b = 0; b < totalBlocks; b++) {
-        const cleanEcc = _computeEcc(new Uint8Array(blockData[b]), eccPerBlock);
-        for (let j = 0; j < eccPerBlock; j++) {
-            const physIdx = totalData + j * totalBlocks + b;
-            if (physIdx < physicalCW.length && physicalCW[physIdx] !== cleanEcc[j]) errors++;
-        }
-    }
-
-    return errors;
+    return total;
 }
 
 const textEncoder = new TextEncoder();
@@ -793,6 +834,7 @@ const QRStego = {
         const {
             bitMatrix,
             rawBytes = null,
+            rawModules = null,
             expectedText = '',
             extractPadding = true,
             extractECC = true,
@@ -805,7 +847,9 @@ const QRStego = {
         const size = bitMatrix.getWidth();
         let modules;
 
-        if (sampleCanvas && sampleTransform) {
+        if (Array.isArray(rawModules) && rawModules.length) {
+            modules = rawModules.map(row => Array.from(row, Boolean));
+        } else if (sampleCanvas && sampleTransform) {
             // Direct pixel sampling matches the dot overlay exactly (luma < 128),
             // avoiding HybridBinarizer's adaptive thresholding which can misclassify
             // ECC-region modules while still letting ZXing correct the data region.
@@ -845,22 +889,7 @@ const QRStego = {
         try {
             qrData = QRParser.parseBest(modules, expectedText);
 
-            // parseBest may choose a non-canonical orientation for ECI QRs because
-            // ECI mode (nibble 0111) fails the byte-mode check, making all eight
-            // candidates score the same 10000 penalty and leaving format-error count
-            // as the tiebreaker — which can pick the wrong rotation.
-            // ZXing's bitMatrix is always in the correct orientation, so re-extract
-            // data/ECC in rotate0 using the version/eccLevel/mask parseBest detected.
-            try {
-                trimmedModules = QRParser.trimQuietZone(modules);
-                const r0 = QRParser.parseWithMetadata(
-                    trimmedModules, qrData.version, qrData.eccLevel, qrData.mask, qrData.formatErrors || 0
-                );
-                qrData = Object.assign({}, qrData, {
-                    dataCodewords: r0.dataCodewords,
-                    eccCodewords:  r0.eccCodewords
-                });
-            } catch (_) { /* keep parseBest result */ }
+            trimmedModules = QRParser.trimQuietZone(modules);
         } catch (e) {
             console.error('QR parsing failed:', e);
             qrData = {
@@ -905,57 +934,11 @@ const QRStego = {
         };
 
         try {
-            // rawDataStream: ZXing's ECC-corrected sequential data codewords (Block0 then Block1 …).
-            // Populated from rawBytes when available; falls back to building from decoded text.
-            let rawDataStream = rawBytes?.length ? Array.from(rawBytes) : null;
-            if (!rawDataStream && expectedText) {
-                try {
-                    const bi = computeBlockInfo(qrData.version, qrData.eccLevel);
-                    const built = _buildCleanDataCodewords(
-                        Array.from(utf8Bytes(expectedText)), qrData.version, bi.dataCodewords, null
-                    );
-                    if (built) rawDataStream = Array.from(built);
-                } catch (_) { /* leave rawDataStream null */ }
-            }
-            if (rawDataStream && qrData.version && qrData.eccLevel) {
-                // Prefer the blockInfo whose dataCodewords matches rawDataStream.length —
-                // ZXing's parse of format info is more reliable than ours (it uses BCH
-                // error correction), so rawDataStream.length is the authoritative ECC-level
-                // indicator when our parseBest disagrees (e.g. polished/inverted QR coins).
-                let blockInfo = computeBlockInfo(qrData.version, qrData.eccLevel);
-                if (blockInfo.dataCodewords !== rawDataStream.length) {
-                    for (const lvl of ['L', 'M', 'Q', 'H']) {
-                        const bi = computeBlockInfo(qrData.version, lvl);
-                        if (bi.dataCodewords === rawDataStream.length) {
-                            blockInfo = bi;
-                            result.eccLevel = lvl;
-                            break;
-                        }
-                    }
-                }
-
-                // ZXing's BitMatrixParser.readCodewords() unmasks the bitMatrix in-place before
-                // reading, so bitMatrix.get() already returns unmasked bit values by the time
-                // our decode() runs. Build physicalCW directly from that unmasked bitMatrix so
-                // the comparison uses the same binarization as rawDataStream, eliminating false
-                // errors from the luma-threshold vs HybridBinarizer disagreement in the overlay area.
-                // mask=8 falls through to default:return false in shouldUnmask → no second unmask.
-                const bmSize = bitMatrix.getWidth();
-                const bmMods = Array.from({ length: bmSize }, (_, r) =>
-                    Array.from({ length: bmSize }, (_, c) => bitMatrix.get(c, r))
+            if (qrData.version && qrData.eccLevel && qrData.dataCodewords?.length && qrData.eccCodewords?.length) {
+                const blockInfo = computeBlockInfo(qrData.version, qrData.eccLevel);
+                result.errorsFound = countCorrectableCodewordErrors(
+                    qrData.dataCodewords, qrData.eccCodewords, blockInfo
                 );
-                const bmTrimmed = QRParser.trimQuietZone(bmMods);
-                const bits = QRParser.extractDataBits(bmTrimmed, qrData.version, 8);
-                const totalCW = blockInfo.dataCodewords + blockInfo.eccPerBlock * blockInfo.totalBlocks;
-                const physicalCW = QRParser.bitsToBytes(bits).slice(0, totalCW);
-                // ZXing sometimes decodes via InvertedLuminanceSource (light-on-dark QR codes),
-                // which causes every data bit in lastBits to be flipped after in-place unmasking.
-                // Try both polarities and take the lower error count — the coin QR case gives 0
-                // errors on the inverted attempt; a normal QR gives 0 on the normal attempt.
-                const errN = countQrErrors(physicalCW, rawDataStream, blockInfo);
-                const errI = countQrErrors(physicalCW.map(b => (~b) & 0xFF), rawDataStream, blockInfo);
-                result.errorsFound = (errN !== null && errI !== null) ? Math.min(errN, errI)
-                    : errN ?? errI;
             }
         } catch (e) {
             result.errorsFound = null;
@@ -963,12 +946,7 @@ const QRStego = {
 
         if (extractPadding) {
             try {
-                const zxingDataCodewords = rawBytes ? Array.from(rawBytes) : [];
                 result.paddingSecret = '';
-
-                if (zxingDataCodewords.length > 0) {
-                    result.paddingSecret = QRParser.extractPaddingSecret(zxingDataCodewords, qrData.version) || '';
-                }
 
                 if (!result.paddingSecret && qrData.dataCodewords && qrData.dataCodewords.length > 0) {
                     result.paddingSecret = QRParser.extractPaddingSecret(qrData.dataCodewords, qrData.version) || '';

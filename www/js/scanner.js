@@ -25,11 +25,14 @@ let _queuedZoom = null;
 let _pendingResult = null;
 let _lastDetectionAt = 0;
 let _autoConfirmTimer = null;
+let _stableText = null;
+let _stableDecodeCount = 0;
 
 // How long the highlight stays visible before auto-confirming.
-// Must be <= DETECTION_GRACE_MS so _pendingResult is still set when the timer fires.
 const AUTO_CONFIRM_DELAY_MS = 450;
 const DETECTION_GRACE_MS = 500;
+const AUTO_CONFIRM_FRESHNESS_MS = 200;
+const STABLE_DECODE_FRAMES = 2;
 
 // Intercepts ZXing's internal GridSampler to capture the perspective-corrected
 // BitMatrix (the clean boolean module grid) before it's consumed by the decoder.
@@ -38,6 +41,7 @@ class CapturingGridSampler extends ZXing.DefaultGridSampler {
     constructor() {
         super();
         this.lastBits = null;
+        this.lastModules = null;
         this.lastTransform = null;
         this.lastDimX = 0;
         this.lastDimY = 0;
@@ -45,6 +49,7 @@ class CapturingGridSampler extends ZXing.DefaultGridSampler {
     sampleGridWithTransform(image, dimensionX, dimensionY, transform) {
         const bits = super.sampleGridWithTransform(image, dimensionX, dimensionY, transform);
         this.lastBits = bits;
+        this.lastModules = _snapshotBitMatrix(bits);
         this.lastTransform = transform;
         this.lastDimX = dimensionX;
         this.lastDimY = dimensionY;
@@ -59,6 +64,8 @@ async function startScanner(videoEl, canvasEl, overlayEl, onConfirm) {
     _pendingResult = null;
     _lastDetectionAt = 0;
     _autoConfirmTimer = null;
+    _stableText = null;
+    _stableDecodeCount = 0;
     videoEl.classList.remove('video-ready');
 
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -304,40 +311,67 @@ function _tick(videoEl, canvasEl) {
             clone.height = canvasEl.height;
             clone.getContext('2d').drawImage(canvasEl, 0, 0);
 
+            const text = result.getText();
+            if (text === _stableText) {
+                _stableDecodeCount++;
+            } else {
+                _stableText = text;
+                _stableDecodeCount = 1;
+                _cancelAutoConfirm();
+            }
+
             _pendingResult = {
-                text: result.getText(),
+                text,
                 bitMatrix: _capturingSampler.lastBits,
+                rawModules: _capturingSampler.lastModules,
                 rawBytes: typeof result.getRawBytes === 'function' ? result.getRawBytes() : null,
-                snap: { canvas: clone, transform: _capturingSampler.lastTransform }
+                snap: { canvas: clone, transform: _capturingSampler.lastTransform },
+                detectedAt: performance.now()
             };
 
             const points = result.getResultPoints ? result.getResultPoints() : [];
             _drawHighlight(videoEl, canvasEl, points);
-            _lastDetectionAt = performance.now();
+            _lastDetectionAt = _pendingResult.detectedAt;
 
             // Start the auto-confirm countdown once per detection window.
             // The highlight stays visible for AUTO_CONFIRM_DELAY_MS so the user
             // can see which code was scanned before the result screen appears.
-            if (!_autoConfirmTimer) {
+            if (_stableDecodeCount >= STABLE_DECODE_FRAMES && !_autoConfirmTimer) {
                 _autoConfirmTimer = setTimeout(_fireAutoConfirm, AUTO_CONFIRM_DELAY_MS);
             }
         } catch (_) {
+            _pendingResult = null;
+            _stableText = null;
+            _stableDecodeCount = 0;
+            _cancelAutoConfirm();
             if (performance.now() - _lastDetectionAt > DETECTION_GRACE_MS) {
-                _pendingResult = null;
                 _clearHighlight();
-                if (_autoConfirmTimer) {
-                    clearTimeout(_autoConfirmTimer);
-                    _autoConfirmTimer = null;
-                }
             }
         }
     }
     _animFrame = requestAnimationFrame(() => _tick(videoEl, canvasEl));
 }
 
+function _cancelAutoConfirm() {
+    if (!_autoConfirmTimer) return;
+    clearTimeout(_autoConfirmTimer);
+    _autoConfirmTimer = null;
+}
+
 function _fireAutoConfirm() {
     _autoConfirmTimer = null;
-    if (_pendingResult) confirmScan();
+    if (!_pendingResult) return;
+
+    if (
+        _stableDecodeCount >= STABLE_DECODE_FRAMES &&
+        _pendingResult.text === _stableText &&
+        performance.now() - _pendingResult.detectedAt <= AUTO_CONFIRM_FRESHNESS_MS
+    ) {
+        confirmScan();
+        return;
+    }
+
+    _pendingResult = null;
 }
 
 // Returns the affine scale/offset that maps video pixel coords to display pixel coords,
@@ -427,14 +461,20 @@ function confirmScan() {
     const r = _pendingResult;
     _pendingResult = null;
     stopScanner();
-    if (_onConfirm) _onConfirm(r.text, r.bitMatrix, r.rawBytes, r.snap);
+    if (_onConfirm) _onConfirm(r.text, r.bitMatrix, r.rawBytes, r.snap, r.rawModules);
+}
+
+function _snapshotBitMatrix(bitMatrix) {
+    if (!bitMatrix) return null;
+    const width = bitMatrix.getWidth();
+    const height = bitMatrix.getHeight();
+    return Array.from({ length: height }, (_, row) =>
+        Array.from({ length: width }, (_, col) => bitMatrix.get(col, row))
+    );
 }
 
 function stopScanner() {
-    if (_autoConfirmTimer) {
-        clearTimeout(_autoConfirmTimer);
-        _autoConfirmTimer = null;
-    }
+    _cancelAutoConfirm();
     _teardownPinchZoom();
     if (_torchBtn) {
         _torchBtn.onclick = null;
@@ -459,6 +499,8 @@ function stopScanner() {
     document.getElementById('scanner-video')?.classList.remove('video-ready');
     _pendingResult = null;
     _lastDetectionAt = 0;
+    _stableText = null;
+    _stableDecodeCount = 0;
     _clearHighlight();
 }
 

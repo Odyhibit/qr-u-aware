@@ -226,15 +226,18 @@ const QRParser = {
     parseBest(modules, expectedText = '') {
         const normalizedModules = this.trimQuietZone(modules);
         const expectedBytes = this.stringToBytes(expectedText);
-        const candidates = this.moduleTransforms(normalizedModules).flatMap(({ name, modules: candidateModules }) => {
+
+        const buildCandidates = (name, candidateModules) => {
             try {
                 const formatInfo = this.readFormatInfo(candidateModules);
+                const mirrorCheck = this.checkMirroredFormat(candidateModules);
                 const version = this.detectVersion(candidateModules.length);
                 const results = [];
 
                 const formatIsReliable = (formatInfo.errors || 0) <= 3;
-                const eccLevels = formatIsReliable ? [formatInfo.eccLevel] : ['L', 'M', 'Q', 'H'];
-                const masks = formatIsReliable ? [formatInfo.mask] : [0, 1, 2, 3, 4, 5, 6, 7];
+                const tryAlternates = !formatIsReliable;
+                const eccLevels = tryAlternates ? ['L', 'M', 'Q', 'H'] : [formatInfo.eccLevel];
+                const masks = tryAlternates ? [0, 1, 2, 3, 4, 5, 6, 7] : [formatInfo.mask];
 
                 for (const eccLevel of eccLevels) {
                     for (const mask of masks) {
@@ -246,23 +249,120 @@ const QRParser = {
                             eccLevel === formatInfo.eccLevel && mask === formatInfo.mask ? formatInfo.errors || 0 : 10
                         );
                         parsed.orientation = name;
+                        parsed.finderScore = this.finderOrientationScore(candidateModules);
+                        parsed.formatMirrorCheck = mirrorCheck;
                         parsed.score = this.scoreParseCandidate(parsed, expectedBytes);
-                        if (!formatIsReliable && (eccLevel !== formatInfo.eccLevel || mask !== formatInfo.mask)) {
-                            parsed.score += expectedBytes.length > 0 ? 25000 : 1000;
+                        parsed.score += parsed.finderScore * 10000;
+                        if (mirrorCheck.looksMirrored && !name.includes('mirror')) {
+                            parsed.score += 1000000;
+                        } else if (!mirrorCheck.looksMirrored && name.includes('mirror')) {
+                            parsed.score += 5000;
+                        }
+                        if ((eccLevel !== formatInfo.eccLevel || mask !== formatInfo.mask)) {
+                            parsed.score += formatIsReliable ? 2000 : 1000;
                         }
                         results.push(parsed);
                     }
                 }
-                return results;
+                return { formatInfo, results };
             } catch (e) {
-                return [];
+                return { formatInfo: null, results: [] };
             }
-        }).sort((a, b) => a.score - b.score);
+        };
+
+        const canonical = buildCandidates('rotate0', normalizedModules);
+        const canonicalResults = canonical.results.sort((a, b) => a.score - b.score);
+        const canonicalMirrorCheck = canonicalResults[0]?.formatMirrorCheck || null;
+        if (
+            canonical.formatInfo &&
+            (canonical.formatInfo.errors || 0) <= 3 &&
+            canonicalMirrorCheck &&
+            canonicalMirrorCheck.forwardErrors === 0 &&
+            !canonicalMirrorCheck.looksMirrored &&
+            canonicalResults.length
+        ) {
+            return canonicalResults[0];
+        }
+
+        const transformCandidates = this.moduleTransforms(normalizedModules)
+            .filter(({ name }) => name !== 'rotate0')
+            .flatMap(({ name, modules: candidateModules }) => buildCandidates(name, candidateModules).results)
+            .concat(canonicalResults);
+
+        const candidates = transformCandidates.sort((a, b) => a.score - b.score);
 
         if (!candidates.length) {
             throw new Error('Could not parse QR module grid in any orientation');
         }
         return candidates[0];
+    },
+
+    checkMirroredFormat(modules) {
+        const copies = this.readFormatCopies(modules);
+        const reversedPrimary = this.decodeFormatInt(this.reverseBits(copies.primary.raw, 15));
+        const reversedSecondary = this.decodeFormatInt(this.reverseBits(copies.secondary.raw, 15));
+        const forwardErrors = Math.min(copies.primary.decoded.errors, copies.secondary.decoded.errors);
+        const reverseErrors = Math.min(reversedPrimary.errors, reversedSecondary.errors);
+
+        return {
+            forwardErrors,
+            reverseErrors,
+            looksMirrored: forwardErrors > 0 && reverseErrors === 0,
+            reversedPrimary,
+            reversedSecondary
+        };
+    },
+
+    reverseBits(value, width) {
+        let out = 0;
+        for (let i = 0; i < width; i++) {
+            out = (out << 1) | ((value >> i) & 1);
+        }
+        return out;
+    },
+
+    finderOrientationScore(modules) {
+        const scores = this.finderCornerScores(modules);
+        if (!scores) return 999;
+
+        const required = scores.tl + scores.tr + scores.bl;
+        const missingCornerPenalty = scores.br < Math.max(scores.tl, scores.tr, scores.bl) ? 25 : 0;
+        return required + missingCornerPenalty;
+    },
+
+    finderCornerScores(modules) {
+        const size = modules.length;
+        if (size < 21) return null;
+
+        const FINDER = [
+            [1,1,1,1,1,1,1],
+            [1,0,0,0,0,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,1,1,1,0,1],
+            [1,0,0,0,0,0,1],
+            [1,1,1,1,1,1,1]
+        ];
+        const s = size - 1;
+
+        const score = (r0, c0, dr, dc) => {
+            let mismatches = 0;
+            for (let r = 0; r < 7; r++) {
+                for (let c = 0; c < 7; c++) {
+                    if (((modules[r0 + r * dr]?.[c0 + c * dc]) ? 1 : 0) !== FINDER[r][c]) {
+                        mismatches++;
+                    }
+                }
+            }
+            return mismatches;
+        };
+
+        return {
+            tl: score(0, 0, 1, 1),
+            tr: score(0, s, 1, -1),
+            bl: score(s, 0, -1, 1),
+            br: score(s, s, -1, -1)
+        };
     },
 
     trimQuietZone(modules) {
@@ -393,11 +493,18 @@ const QRParser = {
     scoreParseCandidate(parsed, expectedBytes) {
         let score = (parsed.formatErrors || 0) * 100;
         const payload = this.readByteModePayload(parsed.dataCodewords, parsed.version);
+        const codewordErrors = this.countCorrectableCodewordErrors(parsed);
+        parsed.codewordErrors = codewordErrors;
 
-        if (payload.mode !== 4 && payload.mode !== 7) score += 10000;
-        if (!payload.validCount) score += 5000;
+        if (codewordErrors === null) {
+            score += 50000;
+        } else {
+            score += codewordErrors * 1000;
+        }
 
-        if (expectedBytes.length > 0) {
+        if ((payload.mode === 4 || payload.mode === 7) && !payload.validCount) score += 500;
+
+        if ((payload.mode === 4 || payload.mode === 7) && expectedBytes.length > 0) {
             score += Math.abs(payload.count - expectedBytes.length) * 50;
             if (payload.bytes.length >= expectedBytes.length) {
                 let mismatches = 0;
@@ -412,6 +519,128 @@ const QRParser = {
         }
 
         return score;
+    },
+
+    _gfInit() {
+        if (this._gfExp && this._gfLog) return;
+        this._gfExp = new Uint8Array(512);
+        this._gfLog = new Uint8Array(256);
+        let x = 1;
+        for (let i = 0; i < 255; i++) {
+            this._gfExp[i] = x;
+            this._gfExp[i + 255] = x;
+            this._gfLog[x] = i;
+            x = ((x << 1) ^ (x & 0x80 ? 0x1D : 0)) & 0xFF;
+        }
+    },
+
+    _gfMul(a, b) {
+        this._gfInit();
+        return (a === 0 || b === 0) ? 0 : this._gfExp[this._gfLog[a] + this._gfLog[b]];
+    },
+
+    _gfDiv(a, b) {
+        this._gfInit();
+        if (b === 0) throw new Error('GF division by zero');
+        return a === 0 ? 0 : this._gfExp[(this._gfLog[a] - this._gfLog[b] + 255) % 255];
+    },
+
+    _rsSyndromes(codewords, eccLen) {
+        this._gfInit();
+        const syndromes = [];
+        for (let i = 0; i < eccLen; i++) {
+            const x = this._gfExp[i];
+            let y = 0;
+            for (const b of codewords) {
+                y = this._gfMul(y, x) ^ b;
+            }
+            syndromes.push(y);
+        }
+        return syndromes;
+    },
+
+    _rsErrorCountForBlock(dataBlock, eccBlock, eccLen) {
+        const syndromes = this._rsSyndromes([...dataBlock, ...eccBlock], eccLen);
+        if (syndromes.every(v => v === 0)) return 0;
+
+        let c = [1];
+        let b = [1];
+        let l = 0;
+        let m = 1;
+        let bb = 1;
+
+        for (let n = 0; n < eccLen; n++) {
+            let d = syndromes[n];
+            for (let i = 1; i <= l; i++) {
+                d ^= this._gfMul(c[i] || 0, syndromes[n - i]);
+            }
+
+            if (d === 0) {
+                m++;
+                continue;
+            }
+
+            const t = c.slice();
+            const coef = this._gfDiv(d, bb);
+            for (let i = 0; i < b.length; i++) {
+                c[i + m] = (c[i + m] || 0) ^ this._gfMul(coef, b[i]);
+            }
+
+            if (2 * l <= n) {
+                l = n + 1 - l;
+                b = t;
+                bb = d;
+                m = 1;
+            } else {
+                m++;
+            }
+        }
+
+        return l <= Math.floor(eccLen / 2) ? l : null;
+    },
+
+    countCorrectableCodewordErrors(parsed) {
+        if (!parsed?.dataCodewords?.length || !parsed?.eccCodewords?.length) return null;
+
+        const spec = parsed.eccSpec || this.getBlockSpec(parsed.version, parsed.eccLevel);
+        let dataOff = 0;
+        let eccOff = 0;
+        let total = 0;
+
+        for (const dLen of spec.dataBlockLens) {
+            const dataBlock = parsed.dataCodewords.slice(dataOff, dataOff + dLen);
+            const eccBlock = parsed.eccCodewords.slice(eccOff, eccOff + spec.eccPerBlock);
+            const count = this._rsErrorCountForBlock(dataBlock, eccBlock, spec.eccPerBlock);
+            if (count === null) return null;
+            total += count;
+            dataOff += dLen;
+            eccOff += spec.eccPerBlock;
+        }
+
+        return total;
+    },
+
+    countEccMismatches(parsed) {
+        if (!parsed?.dataCodewords?.length || !parsed?.eccCodewords?.length) return null;
+        if (typeof qrcodegen === 'undefined' || !qrcodegen.QrCode) return null;
+
+        const spec = parsed.eccSpec || this.getBlockSpec(parsed.version, parsed.eccLevel);
+        const divisor = qrcodegen.QrCode.reedSolomonComputeDivisor(spec.eccPerBlock);
+        let dataOff = 0;
+        let eccOff = 0;
+        let mismatches = 0;
+
+        for (const dLen of spec.dataBlockLens) {
+            const dataBlock = parsed.dataCodewords.slice(dataOff, dataOff + dLen);
+            const expectedEcc = qrcodegen.QrCode.reedSolomonComputeRemainder(dataBlock, divisor);
+            for (let i = 0; i < spec.eccPerBlock; i++) {
+                if (parsed.eccCodewords[eccOff + i] !== expectedEcc[i]) mismatches++;
+            }
+            dataOff += dLen;
+            eccOff += spec.eccPerBlock;
+        }
+
+        return mismatches;
     },
 
     readByteModePayload(dataCodewords, version) {
@@ -654,8 +883,17 @@ const QRParser = {
      * and returns the result with fewest BCH errors.
      */
     readFormatInfo(modules) {
-        const size = modules.length;
+        const copies = this.readFormatCopies(modules);
+        const r1 = copies.primary.decoded;
+        const r2 = copies.secondary.decoded;
+        const best = copies.dataAgree
+            ? copies.dataDecoded
+            : (r1.errors <= r2.errors ? r1 : r2);
+        return Object.assign({}, best, { copies });
+    },
 
+    readFormatCopies(modules) {
+        const size = modules.length;
         // Coordinates are [x,y,bitIndex]. QR format bits are placed LSB-first
         // around the finder patterns, so reconstruct the raw 15-bit word by
         // setting each bit at its actual index instead of shifting in scan order.
@@ -671,18 +909,55 @@ const QRParser = {
         let sec = 0;
         const secondaryOrder = [
             [size-1,8,0],[size-2,8,1],[size-3,8,2],[size-4,8,3],
-            [size-5,8,4],[size-6,8,5],[size-7,8,6],
-            [8,size-8,7],[8,size-7,8],[8,size-6,9],[8,size-5,10],
+            [size-5,8,4],[size-6,8,5],[size-7,8,6],[size-8,8,7],
+            [8,size-7,8],[8,size-6,9],[8,size-5,10],
             [8,size-4,11],[8,size-3,12],[8,size-2,13],[8,size-1,14]
         ];
         for (const [x, y, bit] of secondaryOrder) {
             if (modules[y][x]) sec |= 1 << bit;
         }
 
-        // Decode whichever copy has fewer BCH errors
         const r1 = this.decodeFormatInt(primary);
         const r2 = this.decodeFormatInt(sec);
-        return r1.errors <= r2.errors ? r1 : r2;
+        const highData = raw => (raw >> 10) & 0x1F;
+        const highBits = raw => highData(raw).toString(2).padStart(5, '0');
+        const asBW = bits => bits.replace(/1/g, 'B').replace(/0/g, 'W');
+        const decodeDataBits = data => {
+            const unmasked = data ^ ((0x5412 >> 10) & 0x1F);
+            const eccLevels = ['M','L','H','Q'];
+            return {
+                eccLevel: eccLevels[(unmasked >> 3) & 3],
+                mask: unmasked & 7,
+                errors: Math.min(r1.errors, r2.errors),
+                dataBitsOnly: true
+            };
+        };
+        const primaryData = highData(primary);
+        const secondaryData = highData(sec);
+        const dataAgree = primaryData === secondaryData;
+
+        return {
+            primary: {
+                raw: primary,
+                rawBits: primary.toString(2).padStart(15, '0'),
+                dataBits: highBits(primary),
+                modules: asBW(highBits(primary)),
+                decoded: r1,
+                dataDecoded: decodeDataBits(primaryData)
+            },
+            secondary: {
+                raw: sec,
+                rawBits: sec.toString(2).padStart(15, '0'),
+                dataBits: highBits(sec),
+                modules: asBW(highBits(sec)),
+                decoded: r2,
+                dataDecoded: decodeDataBits(secondaryData)
+            },
+            agree: r1.eccLevel === r2.eccLevel && r1.mask === r2.mask,
+            dataAgree,
+            dataDecoded: dataAgree ? decodeDataBits(primaryData) : null,
+            best: r1.errors <= r2.errors ? 'primary' : 'secondary'
+        };
     },
 
     // BCH remainder for QR format info (generator 0x537)
