@@ -85,13 +85,27 @@ async function startCamera() {
 
 // ── QR detected ─────────────────────────────────────────────────────────────
 
-async function onQRDetected(rawText, bitMatrix, rawBytes, debugSnap, rawModules = null) {
+async function onQRDetected(scanResult) {
+    const { text: rawText, bitMatrix, rawBytes, snap: debugSnap, nativeMeta = null, moduleImage = null, moduleCount = null } = scanResult;
+    let rawModules = scanResult.rawModules || null;
     let stegoResult = { version: '?', eccLevel: '?', maskPattern: '?', padSecret: null, eccSecret: null, errorsFound: null, dataCodewords: [], eccCodewords: [], paddingOffset: 0 };
     try {
+        if (!rawModules && moduleImage && moduleCount) {
+            // Native (Vision) scan: rebuild the real module grid from the rectified QR
+            // crop Swift sent us, so we get full ECC-level analysis instead of the
+            // padding-only nativeMeta fallback below.
+            try {
+                rawModules = await QRStego.sampleModulesFromRectifiedImage(moduleImage, moduleCount);
+            } catch (_) {
+                // sampling failed — fall through to the nativeMeta-only partial decode
+            }
+        }
+
         const decoded = await QRStego.decode({
             bitMatrix,
             rawBytes,
             rawModules,
+            nativeMeta,
             expectedText: rawText,
             extractPadding: true,
             extractECC: true,
@@ -199,6 +213,7 @@ function analyzeLocalUrlRisks(text, { checkHttp = false } = {}) {
     if (url.username || url.password) risks.push({ level: 'threat', label: 'Embedded credentials' });
     if (host.startsWith('xn--') || host.includes('.xn--')) risks.push({ level: 'warn', label: 'Punycode domain' });
     if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) risks.push({ level: 'warn', label: 'IP address' });
+    if (isPrivateNetworkUrl(raw)) risks.push({ level: 'warn', label: 'Private network address' });
     if (_SHORT_LINK_HOSTS.has(host) || _isSmartLinkHost(host)) {
         risks.push({ level: 'info', label: 'Redirect service' });
     }
@@ -363,7 +378,7 @@ function _computeSimpleReasons(scan) {
 
 function simpleOpenUrl() {
     if (!_lastScan) return;
-    window.open(_lastScan.finalUrl || normalizeUrl(_lastScan.content), '_blank');
+    openExternalUrl(_lastScan.finalUrl || normalizeUrl(_lastScan.content));
 }
 
 // ── Result rendering ─────────────────────────────────────────────────────────
@@ -415,7 +430,7 @@ function renderResult(scan) {
 
     if (scan.contentType === 'url') {
         urlBtn.classList.remove('hidden');
-        urlBtn.onclick = () => window.open(normalizeUrl(scan.content), '_blank');
+        urlBtn.onclick = () => openExternalUrl(normalizeUrl(scan.content));
         _runUrlSafetyWorkflow(scan.content);
     } else {
         urlBtn.classList.add('hidden');
@@ -498,7 +513,8 @@ function renderDestLocalChecks(scan) {
 function _localRiskChipLevel(label, scanLevel) {
     if (scanLevel === 'threat') return label === 'Embedded credentials' ? 'threat' : 'warn';
     if (label === 'Redirect service' || label === 'Long query' || label === 'Sensitive parameter') return 'info';
-    if (label === 'HTTP' || label === 'Punycode domain' || label === 'IP address' || label === 'Invalid URL') return 'warn';
+    if (label === 'HTTP' || label === 'Punycode domain' || label === 'IP address'
+        || label === 'Private network address' || label === 'Invalid URL') return 'warn';
     return scanLevel === 'safe' ? 'safe' : 'warn';
 }
 
@@ -572,6 +588,17 @@ function setCollapsibleText(el, text) {
 async function _runUrlSafetyWorkflow(originalUrl) {
     const runId = ++_safetyRunId;
     const normalizedUrl = normalizeUrl(originalUrl);
+
+    // Never contact private/local network addresses — a hostile QR could
+    // otherwise use the app to probe the user's router or other LAN devices,
+    // and reputation services can't say anything useful about them anyway.
+    // Local checks already flag these URLs; the user can still open manually.
+    if (isPrivateNetworkUrl(normalizedUrl)) {
+        _safetyCheckState = 'done';
+        _updateSimpleVerdict();
+        return;
+    }
+
     const prefs = typeof getNetworkPreferences === 'function' ? getNetworkPreferences() : {
         autoGsb: false,
         autoVt: false,
@@ -1191,7 +1218,7 @@ async function _resolveScannedPage(url) {
             throw new Error('QR code is password-protected');
         }
         const dest = json?.data?.url;
-        if (!dest) return null;
+        if (!dest || !/^https?:\/\//i.test(dest)) return null;
         return dest.replace(/^http:\/\//i, 'https://');
     } catch (err) {
         if (err.message.includes('password')) throw err;
@@ -1213,7 +1240,7 @@ async function _resolveViewPage(url) {
             throw new Error('QR code is password-protected');
         }
         const dest = json?.data?.url;
-        if (!dest) return null;
+        if (!dest || !/^https?:\/\//i.test(dest)) return null;
         return dest.replace(/^http:\/\//i, 'https://');
     } catch (err) {
         if (err.message.includes('password')) throw err;
@@ -1271,7 +1298,9 @@ async function _resolveWithUA(url, ua) {
             if (isRedirectStatus(resp.status)) {
                 const loc = getHeader(resp.headers, 'location');
                 if (!loc) return { url: currentUrl, html: '' };
-                currentUrl = new URL(loc.replace(/^http:\/\//i, 'https://'), currentUrl).href;
+                const nextUrl = new URL(loc.replace(/^http:\/\//i, 'https://'), currentUrl).href;
+                if (!isHttpUrl(nextUrl)) return { url: currentUrl, html: '' };
+                currentUrl = nextUrl;
             } else {
                 return { url: resp.url || currentUrl, html: typeof resp.data === 'string' ? resp.data : '' };
             }
@@ -1298,15 +1327,26 @@ function _extractAppLinksFromPage(html) {
             if (m) result.ios = `https://apps.apple.com/app/id${m[1]}`;
         }
         if (!result.ios) {
-            const a = doc.querySelector('a[href*="apps.apple.com"]')?.getAttribute('href');
-            if (a) result.ios = a;
+            result.ios = _storeLinkFromPage(doc, 'a[href*="apps.apple.com"]', 'apps.apple.com');
         }
         if (!result.android) {
-            const a = doc.querySelector('a[href*="play.google.com/store"]')?.getAttribute('href');
-            if (a) result.android = a;
+            result.android = _storeLinkFromPage(doc, 'a[href*="play.google.com/store"]', 'play.google.com');
         }
     } catch (_) {}
     return result;
+}
+
+// Anchor hrefs come from a page we don't control — accept them only if they
+// are real http(s) links whose host actually is the expected store domain,
+// not merely a URL containing it (e.g. javascript:...//apps.apple.com).
+function _storeLinkFromPage(doc, selector, expectedHost) {
+    const href = doc.querySelector(selector)?.getAttribute('href');
+    if (!href || !isHttpUrl(href)) return undefined;
+    try {
+        const host = new URL(href).hostname.toLowerCase();
+        if (host === expectedHost || host.endsWith('.' + expectedHost)) return href;
+    } catch (_) {}
+    return undefined;
 }
 
 // Probes a smart link URL with iOS, Android, and desktop User-Agents in parallel.
@@ -1349,7 +1389,7 @@ function _showRedirectChain(originalUrl, resolution) {
     const hops = _buildRedirectHops(originalUrl, finalUrl, destinations);
     _renderRedirectHops(hops);
     const openUrl = _preferredDestinationUrl(finalUrl, destinations);
-    document.getElementById('result-open-resolved').onclick = () => window.open(openUrl, '_blank');
+    document.getElementById('result-open-resolved').onclick = () => openExternalUrl(openUrl);
 
     const platformBadge = document.getElementById('result-platform-badge');
     if (platform) {
@@ -1408,7 +1448,7 @@ function _renderRedirectHops(hops) {
             const open = document.createElement('button');
             open.className = 'platform-dest-open btn btn-sm btn-secondary';
             open.textContent = 'Open';
-            open.addEventListener('click', () => window.open(hop.url, '_blank'));
+            open.addEventListener('click', () => openExternalUrl(hop.url));
             row.appendChild(open);
         }
         container.appendChild(row);
@@ -1643,7 +1683,7 @@ async function followRedirectsWithNativeHttp(url, onRedirectDetected = () => {})
         const response = await nativeRedirectRequest(http, currentUrl, userAgent);
         if (!isRedirectStatus(response.status)) {
             const htmlRedirect = extractHtmlRedirect(response.data, response.url || currentUrl);
-            if (htmlRedirect) {
+            if (htmlRedirect && isHttpUrl(htmlRedirect)) {
                 onRedirectDetected();
                 currentUrl = htmlRedirect;
                 continue;
@@ -1655,10 +1695,16 @@ async function followRedirectsWithNativeHttp(url, onRedirectDetected = () => {})
         if (!rawLocation) {
             return response.url || currentUrl;
         }
-        onRedirectDetected();
         // Upgrade HTTP redirect locations — same ATS/security reason as normalizeUrl.
         const location = rawLocation.replace(/^http:\/\//i, 'https://');
-        currentUrl = new URL(location, currentUrl).href;
+        const nextUrl = new URL(location, currentUrl).href;
+        if (!isHttpUrl(nextUrl)) {
+            // Redirect into an app scheme (itms-apps:, intent:, …) — treat the
+            // last web URL as the final destination rather than following it.
+            return response.url || currentUrl;
+        }
+        onRedirectDetected();
+        currentUrl = nextUrl;
     }
     throw new Error('Too many redirects');
 }
@@ -1712,6 +1758,55 @@ function normalizeUrl(url) {
     // original http:// scheme in followRedirects if the HTTPS attempt fails.
     if (/^http:\/\//i.test(trimmed)) return 'https://' + trimmed.slice(7);
     return `https://${trimmed}`;
+}
+
+// Only http(s) URLs may be opened or followed — blocks javascript:, data:,
+// intent:, and custom app schemes that a hostile page, redirect chain, or
+// shortener API response could inject.
+function isHttpUrl(url) {
+    try {
+        const protocol = new URL(url).protocol;
+        return protocol === 'https:' || protocol === 'http:';
+    } catch (_) {
+        return false;
+    }
+}
+
+function openExternalUrl(url) {
+    if (!isHttpUrl(url)) {
+        showToast('Blocked non-web link');
+        return;
+    }
+    window.open(url, '_blank');
+}
+
+// True when the URL targets a private/local network address. Automatic network
+// checks are skipped for these so a scanned QR can't silently make the app
+// probe the user's router or other LAN devices.
+function isPrivateNetworkUrl(url) {
+    let host;
+    try {
+        host = new URL(normalizeUrl(url)).hostname.toLowerCase().replace(/\.$/, '');
+    } catch (_) {
+        return false;
+    }
+    const bare = host.replace(/^\[|\]$/g, '');
+    if (bare === 'localhost' || bare.endsWith('.localhost')) return true;
+    if (bare.endsWith('.local') || bare.endsWith('.internal') || bare.endsWith('.home.arpa')) return true;
+    if (bare.includes(':')) {
+        // IPv6 literal: loopback, link-local (fe80::/10), unique-local (fc00::/7)
+        return bare === '::1' || /^fe[89ab]/i.test(bare) || /^f[cd]/i.test(bare);
+    }
+    if (!bare.includes('.')) return true; // single-label intranet hostname
+    const m = bare.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!m) return false;
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    return a === 0 || a === 10 || a === 127
+        || (a === 192 && b === 168)
+        || (a === 172 && b >= 16 && b <= 31)
+        || (a === 169 && b === 254)
+        || (a === 100 && b >= 64 && b <= 127);
 }
 
 function extractHtmlRedirect(body, baseUrl) {

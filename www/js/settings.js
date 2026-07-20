@@ -16,15 +16,19 @@ function saveAdvancedMode(value) {
     localStorage.setItem(_PREF_ADVANCED_MODE, value ? '1' : '0');
 }
 
+function getDefaultGsbApiKey() {
+    return String(window.QR_STEGO_CONFIG?.googleSafeBrowsingApiKey || '').trim();
+}
+
 async function initSettings() {
     _updateStorageNote();
-    const [gsbKey, storedGsb, vt] = await Promise.all([
-        getGsbApiKey(), SecureKeys.get(_KEY_GSB), SecureKeys.get(_KEY_VT)
-    ]);
-    if (storedGsb) document.getElementById('setting-gsb-key').value = storedGsb;
-    if (vt)        document.getElementById('setting-vt-key').value  = vt;
-    _loadNetworkPreferences(Boolean(gsbKey), Boolean(vt));
-    _bindGsbKeyAvailability();
+    // Legacy cleanup: earlier builds allowed a custom Google Safe Browsing key
+    // and a native-detection test switch; both are gone, so drop stored values.
+    SecureKeys.remove(_KEY_GSB).catch(() => {});
+    localStorage.removeItem('qr_pref_native_detection');
+    const vt = await SecureKeys.get(_KEY_VT);
+    if (vt) document.getElementById('setting-vt-key').value = vt;
+    _loadNetworkPreferences(Boolean(getDefaultGsbApiKey()), Boolean(vt));
     _bindVtKeyAvailability();
     _loadAdvancedMode();
     _bindAdvancedMode();
@@ -65,9 +69,9 @@ function _updateStorageNote() {
 }
 
 async function saveApiKeys() {
-    const gsbVal = document.getElementById('setting-gsb-key').value.trim();
     const vtVal  = document.getElementById('setting-vt-key').value.trim();
-    const autoGsb = gsbVal && document.getElementById('setting-auto-gsb').checked;
+    const hasGsbKey = Boolean(getDefaultGsbApiKey());
+    const autoGsb = hasGsbKey && document.getElementById('setting-auto-gsb').checked;
     const autoRedirects = document.getElementById('setting-auto-redirects').checked;
     const autoDomainAge = document.getElementById('setting-auto-domain-age').checked;
     const autoVt = vtVal && document.getElementById('setting-auto-vt').checked;
@@ -77,11 +81,6 @@ async function saveApiKeys() {
     btn.textContent = 'Saving…';
 
     try {
-        if (gsbVal) {
-            await SecureKeys.set(_KEY_GSB, gsbVal);
-        } else {
-            await SecureKeys.remove(_KEY_GSB);
-        }
         if (vtVal) {
             await SecureKeys.set(_KEY_VT, vtVal);
         } else {
@@ -93,7 +92,6 @@ async function saveApiKeys() {
             autoRedirects,
             autoDomainAge
         });
-        _setGsbAutoAvailable(Boolean(gsbVal));
         _setVtAutoAvailable(Boolean(vtVal));
         showToast('Settings saved');
     } catch (err) {
@@ -104,17 +102,7 @@ async function saveApiKeys() {
     }
 }
 
-async function clearGsbKey() {
-    if (!confirm('Clear saved Google Safe Browsing API key?')) return;
-    await SecureKeys.remove(_KEY_GSB);
-    document.getElementById('setting-gsb-key').value = '';
-    document.getElementById('setting-auto-gsb').checked = false;
-    saveNetworkPreferences({ ...getNetworkPreferences(), autoGsb: false });
-    _setGsbAutoAvailable(false);
-    showToast('Google Safe Browsing key cleared');
-}
-
-async function clearApiKeys() {
+async function clearVtKey() {
     if (!confirm('Clear saved VirusTotal API key?')) return;
     await SecureKeys.remove(_KEY_VT);
     document.getElementById('setting-vt-key').value  = '';
@@ -132,9 +120,7 @@ function toggleKeyVisibility(inputId, btnEl) {
 }
 
 // Called by app.js when retrieving keys for API calls.
-async function getGsbApiKey() {
-    return await SecureKeys.get(_KEY_GSB) || window.QR_STEGO_CONFIG?.googleSafeBrowsingApiKey || '';
-}
+async function getGsbApiKey() { return getDefaultGsbApiKey(); }
 async function getVtApiKey()  { return SecureKeys.get(_KEY_VT);  }
 
 function getNetworkPreferences() {
@@ -155,19 +141,12 @@ function saveNetworkPreferences(prefs) {
 
 function _loadNetworkPreferences(hasGsbKey, hasVtKey) {
     const prefs = getNetworkPreferences();
-    document.getElementById('setting-auto-gsb').checked = hasGsbKey && prefs.autoGsb;
+    _setGsbAutoAvailable(hasGsbKey);
+    document.getElementById('setting-auto-gsb').checked = Boolean(hasGsbKey && prefs.autoGsb);
     document.getElementById('setting-auto-redirects').checked = prefs.autoRedirects;
     document.getElementById('setting-auto-domain-age').checked = prefs.autoDomainAge;
     document.getElementById('setting-auto-vt').checked = hasVtKey && prefs.autoVt;
-    _setGsbAutoAvailable(hasGsbKey);
     _setVtAutoAvailable(hasVtKey);
-}
-
-function _bindGsbKeyAvailability() {
-    const input = document.getElementById('setting-gsb-key');
-    if (input.dataset.boundAvailability === '1') return;
-    input.dataset.boundAvailability = '1';
-    input.addEventListener('input', () => _setGsbAutoAvailable(Boolean(input.value.trim())));
 }
 
 function _setGsbAutoAvailable(hasGsbKey) {
@@ -176,8 +155,8 @@ function _setGsbAutoAvailable(hasGsbKey) {
     checkbox.disabled = !hasGsbKey;
     if (!hasGsbKey) checkbox.checked = false;
     hint.textContent = hasGsbKey
-        ? 'Sends scanned URLs to Google Safe Browsing for malware and phishing checks.'
-        : 'Set a Google Safe Browsing API key before enabling automatic checks.';
+        ? "Sends scanned URLs to Google Safe Browsing using the app's built-in key."
+        : 'This build has no Google Safe Browsing key bundled.';
 }
 
 function _bindVtKeyAvailability() {

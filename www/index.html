@@ -17,6 +17,13 @@ html, body {
     color: #e8e8ed;
     touch-action: manipulation;
 }
+html.native-camera-active,
+html.native-camera-active body,
+body.native-camera-active,
+body.native-camera-active #app,
+body.native-camera-active #view-scanner {
+    background: transparent;
+}
 
 /* ── Layout ─────────────────────────────────────────────────────────────────*/
 #app {
@@ -110,6 +117,9 @@ html, body {
 }
 #scanner-video.video-ready {
     opacity: 1;
+}
+body.native-camera-active #scanner-video {
+    display: none;
 }
 #scanner-canvas { display: none; }
 
@@ -757,8 +767,9 @@ html, body {
 .result-mode-pill:active { opacity: 0.7; }
 
 /* ── Simple mode ───────────────────────────────────────────────────────────*/
+/* Hidden-data findings stay visible even in simple mode — they are the
+   app's core signal and never appear unless something was actually found. */
 #view-result.simple-mode .result-section,
-#view-result.simple-mode .result-stego-section,
 #view-result.simple-mode .raw-qr-section { display: none !important; }
 
 .simple-verdict-view { display: none; flex-direction: column; padding: 20px 16px 0; gap: 14px; }
@@ -1057,7 +1068,7 @@ html, body {
                         <input type="checkbox" id="setting-auto-gsb">
                         <div class="settings-check-copy">
                             <label for="setting-auto-gsb">Automatically check Google Safe Browsing</label>
-                            <p id="setting-auto-gsb-hint" class="settings-field-hint">Set a Google Safe Browsing API key before enabling automatic checks.</p>
+                            <p id="setting-auto-gsb-hint" class="settings-field-hint">Sends scanned URLs to Google Safe Browsing using the app's built-in key.</p>
                         </div>
                     </div>
                 </div>
@@ -1094,19 +1105,6 @@ html, body {
                 <div class="settings-section-title">API Keys</div>
 
                 <div class="settings-field">
-                    <label for="setting-gsb-key">Google Safe Browsing</label>
-                    <div class="settings-key-row">
-                        <input type="password" id="setting-gsb-key"
-                            placeholder="API key…"
-                            autocomplete="off" autocorrect="off"
-                            autocapitalize="none" spellcheck="false">
-                        <button class="btn-reveal"
-                            onclick="toggleKeyVisibility('setting-gsb-key', this)">Show</button>
-                    </div>
-                    <p class="settings-field-hint">Free keys available at <strong>console.cloud.google.com</strong> Default key will be used if this is left blank.</p>
-                </div>
-
-                <div class="settings-field">
                     <label for="setting-vt-key">VirusTotal</label>
                     <div class="settings-key-row">
                         <input type="password" id="setting-vt-key"
@@ -1121,8 +1119,7 @@ html, body {
 
                 <div class="settings-actions">
                     <button id="settings-save-btn" class="btn btn-primary" onclick="saveApiKeys()">Save Settings</button>
-                    <button class="btn btn-danger" onclick="clearGsbKey()">Clear GSB Key</button>
-                    <button class="btn btn-danger" onclick="clearApiKeys()">Clear VirusTotal Key</button>
+                    <button class="btn btn-danger" onclick="clearVtKey()">Clear VirusTotal Key</button>
                 </div>
             </div>
 
@@ -1159,8 +1156,8 @@ html, body {
 
 <!-- QR parsing and stego libs (copied from docs/js/) -->
 <script src="js/qrcodegen.js"></script>
-<script src="js/qr-parser.js?v=14"></script>
-<script src="js/stego.js?v=13"></script>
+<script src="js/qr-parser.js?v=16"></script>
+<script src="js/stego.js?v=18"></script>
 
 <!-- ZXing QR detection library -->
 <script src="js/zxing.min.js"></script>
@@ -1169,9 +1166,9 @@ html, body {
 <script src="js/config.js"></script>
 <script src="js/secrets.js" onerror="void 0"></script>
 <script src="js/db.js"></script>
-<script src="js/scanner.js?v=4"></script>
+<script src="js/scanner.js?v=7"></script>
 <script src="js/secure-keys.js"></script>
-<script src="js/settings.js"></script>
-<script src="js/app.js?v=6"></script>
+<script src="js/settings.js?v=5"></script>
+<script src="js/app.js?v=9"></script>
 </body>
 </html>

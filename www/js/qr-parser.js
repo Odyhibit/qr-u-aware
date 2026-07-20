@@ -112,34 +112,22 @@ const QRParser = {
      * pixel sampling is needed here.
      */
     parse(modules) {
-        console.log('[Parse] Starting QR parse...');
 
         if (!modules || !modules.length) {
             throw new Error('No module grid provided');
         }
 
-        console.log(`[Parse] Received ${modules.length}×${modules.length} module grid`);
-
         // Read format information
         const formatInfo = this.readFormatInfo(modules);
         const version = this.detectVersion(modules.length);
 
-        console.log(`[Parse] Version: ${version}, ECC: ${formatInfo.eccLevel}, Mask: ${formatInfo.mask}`);
-
         const blockSpec = this.getBlockSpec(version, formatInfo.eccLevel);
-        console.log(`[Parse] Spec: ${blockSpec.totalBlocks} blocks, ${blockSpec.shortDataSize}/${blockSpec.longDataSize} data bytes/block, ${blockSpec.eccPerBlock} ECC bytes/block`);
 
         // Extract raw bits from QR code
         const bits = this.extractDataBits(modules, version, formatInfo.mask);
-        console.log(`[Parse] Extracted ${bits.length} bits`);
 
         // Convert bits to bytes (codewords)
         const codewords = this.bitsToBytes(bits).slice(0, blockSpec.totalCodewords);
-        console.log(`[Parse] Converted to ${codewords.length} codewords`);
-        console.log(`[Parse] First 20 codewords:`, codewords.slice(0, 20));
-
-        console.log(`[Parse] Splitting: ${blockSpec.totalDataBytes} data bytes (${blockSpec.numShortBlocks}×${blockSpec.shortDataSize} + ${blockSpec.numLongBlocks}×${blockSpec.longDataSize}), ${blockSpec.totalECCBytes} ECC bytes`);
-        console.log(`[Parse] Interleaved data ends at position ${blockSpec.totalDataBytes}`);
 
         // Deinterleave data codewords (handling mixed sizes)
         const dataCodewords = this.deinterleaveMixed(
@@ -150,16 +138,12 @@ const QRParser = {
             blockSpec.longDataSize
         );
 
-        console.log(`[Parse] Deinterleaved data (${dataCodewords.length} bytes):`, dataCodewords.slice(0, 20));
-
         // Deinterleave ECC codewords
         const eccCodewords = this.deinterleave(
             codewords.slice(blockSpec.totalDataBytes, blockSpec.totalCodewords),
             blockSpec.totalBlocks,
             blockSpec.eccPerBlock
         );
-
-        console.log(`[Parse] Deinterleaved ECC:`, eccCodewords.slice(0, 20));
 
         return {
             version,
@@ -813,7 +797,6 @@ const QRParser = {
         }
 
         const moduleSize = (qrWidth / bestSize + qrHeight / bestSize) / 2;
-        console.log(`[Module Detection] QR bounds: ${qrWidth}×${qrHeight} px, grid: ${bestSize}×${bestSize}, module: ${moduleSize.toFixed(2)}px`);
 
         // Perspective-correct sampling: bilinear map from module (col,row) →
         // pixel using jsQR's four corners. Simple rectangular grid sampling
@@ -1241,71 +1224,113 @@ const QRParser = {
     },
 
     /**
-     * Extract padding secret from data codewords
+     * Walk the data-codeword bit stream segment by segment to find where message
+     * data ends and padding begins. Handles every standard segment type — numeric,
+     * alphanumeric, byte, kanji, ECI, FNC1, structured append — not just byte mode,
+     * so QR codes from ordinary generators (which pick numeric/alphanumeric for
+     * plain text) resolve to the correct padding offset too.
+     * Returns the padding start byte index, or -1 if the stream doesn't parse.
+     */
+    findPaddingStart(dataCodewords, version) {
+        if (!dataCodewords || dataCodewords.length === 0) return -1;
+        const capacityBits = dataCodewords.length * 8;
+        let pos = 0;
+        const readBits = (n) => {
+            let v = 0;
+            for (let i = 0; i < n; i++, pos++) {
+                v = (v << 1) | ((dataCodewords[pos >> 3] >> (7 - (pos & 7))) & 1);
+            }
+            return v;
+        };
+        const ccBitsIdx = version <= 9 ? 0 : version <= 26 ? 1 : 2;
+        const ccBitsFor = { 1: [10, 12, 14], 2: [9, 11, 13], 4: [8, 16, 16], 8: [8, 10, 12] };
+
+        for (let guard = 0; guard < 64; guard++) {
+            if (pos + 4 > capacityBits) { pos = capacityBits; break; }
+            const mode = readBits(4);
+            if (mode === 0) break; // terminator
+            if (mode === 7) {      // ECI: 1/2/3-byte designator, then next segment
+                if (pos + 8 > capacityBits) return -1;
+                const b0 = readBits(8);
+                const extra = (b0 & 0x80) === 0 ? 0 : (b0 & 0xC0) === 0x80 ? 8 : (b0 & 0xE0) === 0xC0 ? 16 : -1;
+                if (extra < 0 || pos + extra > capacityBits) return -1;
+                readBits(extra);
+                continue;
+            }
+            if (mode === 5) continue; // FNC1 first position — no payload
+            if (mode === 9) {         // FNC1 second position — 8-bit application indicator
+                if (pos + 8 > capacityBits) return -1;
+                readBits(8);
+                continue;
+            }
+            if (mode === 3) {         // structured append — 4b index + 4b total + 8b parity
+                if (pos + 16 > capacityBits) return -1;
+                readBits(16);
+                continue;
+            }
+
+            const ccTable = ccBitsFor[mode];
+            if (!ccTable) return -1; // unknown mode — stream is not valid QR data
+            const ccBits = ccTable[ccBitsIdx];
+            if (pos + ccBits > capacityBits) return -1;
+            const count = readBits(ccBits);
+            let dataBits;
+            switch (mode) {
+                case 1: dataBits = Math.floor(count / 3) * 10 + [0, 4, 7][count % 3]; break;
+                case 2: dataBits = Math.floor(count / 2) * 11 + (count % 2) * 6; break;
+                case 4: dataBits = count * 8; break;
+                case 8: dataBits = count * 13; break;
+            }
+            if (pos + dataBits > capacityBits) return -1;
+            pos += dataBits;
+        }
+
+        // Byte-align past the terminator; everything after is padding.
+        const padStartBit = pos + (((-pos % 8) + 8) % 8);
+        return Math.min(padStartBit / 8, dataCodewords.length);
+    },
+
+    /**
+     * Extract padding secret from data codewords. Two hiding formats are checked:
+     * 1. Length-prefixed: [len][secret bytes][standard 0xEC/0x11 fill]
+     * 2. Raw overwrite: message bytes written straight over the 0xEC/0x11 fill
      */
     extractPaddingSecret(dataCodewords, version = 5) {
-        console.log(`[Padding] Extracting from ${dataCodewords.length} bytes, version ${version}`);
-        console.log(`[Padding] First 15 bytes:`, dataCodewords.slice(0, 15));
+        const padByteStart = this.findPaddingStart(dataCodewords, version);
+        if (padByteStart < 0 || padByteStart >= dataCodewords.length) return '';
+        const padding = dataCodewords.slice(padByteStart);
 
-        // Calculate where padding starts
-        // For byte mode: mode(4 bits) + count(8 bits for v<=9) + data
-
-        const capacityBits = dataCodewords.length * 8;
-        const ccBits = version <= 9 ? 8 : 16; // Character count bits
-
-        // Try to read the actual message length from the data
-        // First byte has mode in top 4 bits, start of count in bottom 4 bits
-        const firstByte = dataCodewords[0];
-        const mode = (firstByte >> 4) & 0x0F;
-
-        let decoyLen = 8; // Default for "SCAN ME!"
-
-        // Try to read character count
-        if (ccBits === 8) {
-            // Count is in bits 4-11 (parts of byte 0 and byte 1)
-            const count_msb = firstByte & 0x0F;
-            const count_lsb = (dataCodewords[1] >> 4) & 0x0F;
-            decoyLen = (count_msb << 4) | count_lsb;
+        // Format 1: 1-byte length prefix, secret, then spec fill bytes
+        const secretLen = padding[0];
+        if (secretLen > 0 && 1 + secretLen <= padding.length) {
+            const secretStr = this.bytesToString(padding.slice(1, 1 + secretLen));
+            if (secretStr && this._isStandardFill(padding, 1 + secretLen)) return secretStr;
         }
 
-        console.log(`[Padding] Mode: ${mode}, Decoy length: ${decoyLen}`);
-
-        // Calculate bit usage
-        const modeBits = 4;
-        const usedBits = modeBits + ccBits + (8 * decoyLen);
-        const termBits = Math.min(4, capacityBits - usedBits);
-        const afterTerm = usedBits + termBits;
-
-        // Pad to byte boundary
-        const padStartBit = afterTerm + ((-afterTerm) % 8);
-        const padByteStart = Math.floor(padStartBit / 8);
-
-        console.log(`[Padding] Padding starts at byte ${padByteStart}`);
-        console.log(`[Padding] Bytes at padding start:`, dataCodewords.slice(padByteStart, padByteStart + 5));
-
-        // Check if we have room for length prefix
-        if (padByteStart + 1 > dataCodewords.length) {
-            console.log(`[Padding] Not enough room for length prefix`);
-            return '';
+        // Format 2: no prefix — strip the trailing spec fill (a valid 0xEC/0x11
+        // alternation in either phase, since an overwrite preserves the original
+        // absolute phase while a re-encode restarts it) and read what's left.
+        let end = padding.length;
+        while (end > 0) {
+            const b = padding[end - 1];
+            if (b !== 0xEC && b !== 0x11) break;
+            if (end < padding.length && b === padding[end]) break; // must alternate
+            end--;
         }
+        if (end === 0) return ''; // padding is exactly per spec — nothing hidden
+        return this.bytesToString(padding.slice(0, end)) || '';
+    },
 
-        // Read length-prefixed secret (1 byte)
-        const secretLen = dataCodewords[padByteStart];
-
-        console.log(`[Padding] Secret length from prefix: ${secretLen}`);
-
-        // Validate
-        if (secretLen === 0 || secretLen > 255 || padByteStart + 1 + secretLen > dataCodewords.length) {
-            console.log(`[Padding] Invalid secret length`);
-            return '';
+    // True when padding[offset..] is the spec-mandated fill: 0xEC/0x11 strictly
+    // alternating, in either phase (encoders differ on whether the alternation
+    // restarts after a hidden payload or keeps the original phase).
+    _isStandardFill(padding, offset) {
+        for (let i = offset; i < padding.length; i++) {
+            const b = padding[i];
+            if (b !== 0xEC && b !== 0x11) return false;
+            if (i > offset && b === padding[i - 1]) return false;
         }
-
-        // Extract secret
-        const secret = dataCodewords.slice(padByteStart + 1, padByteStart + 1 + secretLen);
-        console.log(`[Padding] Secret bytes:`, secret);
-        const secretStr = this.bytesToString(secret);
-        console.log(`[Padding] Secret string: "${secretStr}"`);
-        return secretStr;
+        return true;
     },
 
     /**
@@ -1314,22 +1339,18 @@ const QRParser = {
     extractECCSecret(eccCodewords, kPerBlock, numBlocks, eccPerBlock) {
         // Suffix format over deinterleaved ECC bytes in block order:
         // final byte = length; previous length bytes = reversed secret.
-        console.log(`[ECC] Total ECC codewords: ${eccCodewords.length}`);
 
         if (eccCodewords.length >= 1) {
             const length = eccCodewords[eccCodewords.length - 1];
-            console.log(`[ECC] Secret length from suffix: ${length}`);
             if (length > 0 && 1 + length <= eccCodewords.length && length < 255) {
                 const secret = eccCodewords
                     .slice(eccCodewords.length - 1 - length, eccCodewords.length - 1)
                     .reverse();
                 const secretStr = this.bytesToString(secret);
-                console.log(`[ECC] Secret string: "${secretStr}"`);
                 return secretStr;
             }
         }
 
-        console.log(`[ECC] No valid secret found`);
         return '';
     },
 

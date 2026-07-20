@@ -156,6 +156,19 @@ function countEccMismatches(dataCodewords, eccCodewords, blockInfo) {
     return mismatches;
 }
 
+// Recompute the true ECC codewords (deinterleaved block order) from a corrected
+// data-codeword stream. For any scannable QR the real ECC equals RS(data) —
+// including GJ-stego ECC payloads, which are valid RS codewords by construction.
+function recomputeBlockEcc(dataCodewords, blockInfo) {
+    const out = [];
+    let off = 0;
+    for (const dLen of blockInfo.dataBlockLens) {
+        out.push(..._computeEcc(new Uint8Array(dataCodewords.slice(off, off + dLen)), blockInfo.eccPerBlock));
+        off += dLen;
+    }
+    return out;
+}
+
 function _rsSyndromes(codewords, eccLen) {
     const syndromes = [];
     for (let i = 0; i < eccLen; i++) {
@@ -235,6 +248,55 @@ function countCorrectableCodewordErrors(dataCodewords, eccCodewords, blockInfo) 
     }
 
     return total;
+}
+
+// ── Finder-calibrated module classification ─────────────────────────────────
+//
+// A fixed threshold (luma < 128) misreads low-contrast and color-inverted
+// codes (e.g. engraved/shiny coins where modules are lighter than the
+// background). The three finder patterns have known geometry — dark 7×7 ring
+// and 3×3 center, light ring between them — so sampling those positions tells
+// us both the symbol's real dark/light levels and its polarity.
+
+function _finderReferenceCoords(size) {
+    const dark = [];
+    const light = [];
+    for (const [cx, cy] of [[0, 0], [size - 7, 0], [0, size - 7]]) {
+        for (let dy = 0; dy < 7; dy++) {
+            for (let dx = 0; dx < 7; dx++) {
+                const border = dx === 0 || dx === 6 || dy === 0 || dy === 6;
+                const center = dx >= 2 && dx <= 4 && dy >= 2 && dy <= 4;
+                (border || center ? dark : light).push([cx + dx, cy + dy]);
+            }
+        }
+    }
+    return { dark, light };
+}
+
+function _median(values) {
+    if (!values.length) return NaN;
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+}
+
+// lumaAt(col, row) → 0..255 (or NaN when unreadable). Returns { threshold,
+// invert }: a module is dark when (luma < threshold) !== invert. Falls back to
+// the historical fixed threshold when the finder samples don't separate into
+// two convincing levels (min. 16 luma units apart).
+function calibrateModulePolarity(lumaAt, size) {
+    const MIN_SEPARATION = 16;
+    try {
+        const { dark, light } = _finderReferenceCoords(size);
+        const darkMed = _median(dark.map(([x, y]) => lumaAt(x, y)).filter(Number.isFinite));
+        const lightMed = _median(light.map(([x, y]) => lumaAt(x, y)).filter(Number.isFinite));
+        if (!Number.isFinite(darkMed) || !Number.isFinite(lightMed) ||
+            Math.abs(lightMed - darkMed) < MIN_SEPARATION) {
+            return { threshold: 128, invert: false };
+        }
+        return { threshold: (darkMed + lightMed) / 2, invert: darkMed > lightMed };
+    } catch (_) {
+        return { threshold: 128, invert: false };
+    }
 }
 
 const textEncoder = new TextEncoder();
@@ -835,6 +897,7 @@ const QRStego = {
             bitMatrix,
             rawBytes = null,
             rawModules = null,
+            nativeMeta = null,
             expectedText = '',
             extractPadding = true,
             extractECC = true,
@@ -842,82 +905,157 @@ const QRStego = {
             sampleTransform = null
         } = options;
 
-        if (!bitMatrix) throw new Error('decode() requires a bitMatrix');
+        let qrData;
+        const hasRawModules = Array.isArray(rawModules) && rawModules.length;
 
-        const size = bitMatrix.getWidth();
-        let modules;
+        if (bitMatrix || hasRawModules) {
+            let modules;
 
-        if (Array.isArray(rawModules) && rawModules.length) {
-            modules = rawModules.map(row => Array.from(row, Boolean));
-        } else if (sampleCanvas && sampleTransform) {
-            // Direct pixel sampling matches the dot overlay exactly (luma < 128),
-            // avoiding HybridBinarizer's adaptive thresholding which can misclassify
-            // ECC-region modules while still letting ZXing correct the data region.
-            const ctx = sampleCanvas.getContext('2d');
-            const w = sampleCanvas.width, h = sampleCanvas.height;
-            const imgData = ctx.getImageData(0, 0, w, h);
-            modules = [];
-            for (let row = 0; row < size; row++) {
-                modules[row] = [];
-                for (let col = 0; col < size; col++) {
-                    const pts = new Float32Array([col + 0.5, row + 0.5]);
-                    sampleTransform.transformPoints(pts);
-                    const px = Math.round(pts[0]);
-                    const py = Math.round(pts[1]);
-                    if (px < 0 || px >= w || py < 0 || py >= h) {
-                        modules[row][col] = false;
-                    } else {
+            if (hasRawModules) {
+                // Real module grid — whether from ZXing's CapturingGridSampler or from
+                // sampling the native scanner's rectified crop (see
+                // sampleModulesFromRectifiedImage) — needs no bitMatrix at all.
+                modules = rawModules.map(row => Array.from(row, Boolean));
+            } else {
+                const size = bitMatrix.getWidth();
+                if (sampleCanvas && sampleTransform) {
+                    // Direct pixel sampling matches the dot overlay exactly, avoiding
+                    // HybridBinarizer's adaptive thresholding which can misclassify
+                    // ECC-region modules while still letting ZXing correct the data region.
+                    // Threshold and polarity come from the finder patterns, not a fixed
+                    // luma cut, so low-contrast and color-inverted codes sample correctly.
+                    const ctx = sampleCanvas.getContext('2d');
+                    const w = sampleCanvas.width, h = sampleCanvas.height;
+                    const imgData = ctx.getImageData(0, 0, w, h);
+                    const readLuma = (col, row) => {
+                        const pts = new Float32Array([col + 0.5, row + 0.5]);
+                        sampleTransform.transformPoints(pts);
+                        const px = Math.round(pts[0]);
+                        const py = Math.round(pts[1]);
+                        if (px < 0 || px >= w || py < 0 || py >= h) return NaN;
                         const i = (py * w + px) * 4;
-                        const luma = (imgData.data[i] + imgData.data[i + 1] + imgData.data[i + 2]) / 3;
-                        modules[row][col] = luma < 128;
+                        return (imgData.data[i] + imgData.data[i + 1] + imgData.data[i + 2]) / 3;
+                    };
+                    const { threshold, invert } = calibrateModulePolarity(readLuma, size);
+                    modules = [];
+                    for (let row = 0; row < size; row++) {
+                        modules[row] = [];
+                        for (let col = 0; col < size; col++) {
+                            const luma = readLuma(col, row);
+                            modules[row][col] = Number.isFinite(luma) && ((luma < threshold) !== invert);
+                        }
+                    }
+                } else {
+                    // Fallback: use ZXing's BitMatrix directly
+                    modules = [];
+                    for (let row = 0; row < size; row++) {
+                        modules[row] = [];
+                        for (let col = 0; col < size; col++) {
+                            modules[row][col] = bitMatrix.get(col, row);
+                        }
                     }
                 }
             }
-        } else {
-            // Fallback: use ZXing's BitMatrix directly
-            modules = [];
-            for (let row = 0; row < size; row++) {
-                modules[row] = [];
-                for (let col = 0; col < size; col++) {
-                    modules[row][col] = bitMatrix.get(col, row);
-                }
+
+            try {
+                qrData = QRParser.parseBest(modules, expectedText);
+                QRParser.trimQuietZone(modules);
+            } catch (e) {
+                console.error('QR parsing failed:', e);
+                qrData = {
+                    version: 5, size: 37, eccLevel: 'H', mask: 0,
+                    dataCodewords: [], eccCodewords: [], eccSpec: null
+                };
             }
+        } else if (nativeMeta && nativeMeta.version && nativeMeta.eccLevel && rawBytes && rawBytes.length) {
+            // Native (Vision) path: no module grid available. VNBarcodeObservation's
+            // CIQRCodeDescriptor gives us symbolVersion/maskPattern/errorCorrectionLevel
+            // directly, and errorCorrectedPayload is the deinterleaved *data* codeword
+            // stream per ISO/IEC 18004 §6.4.10 (i.e. exactly qrData.dataCodewords) — but
+            // it does not include the ECC codewords, so ECC-based hiding/error-counting
+            // stays unavailable here (eccCodewords: [] makes those steps below no-op).
+            qrData = {
+                version: nativeMeta.version,
+                size: nativeMeta.version * 4 + 17,
+                eccLevel: nativeMeta.eccLevel,
+                mask: typeof nativeMeta.mask === 'number' ? nativeMeta.mask : null,
+                dataCodewords: Array.from(rawBytes),
+                eccCodewords: []
+            };
+        } else {
+            throw new Error('decode() requires a bitMatrix or native version/eccLevel metadata');
         }
 
-        let qrData = null;
-        let trimmedModules = null;
+        // rawBytes are the decoder's RS-corrected data codewords (ZXing's
+        // getRawBytes / Vision's errorCorrectedPayload). Our own module sampling
+        // is independent of the decoder's and can misread modules it handled fine;
+        // such errors corrupt the segment header and hide padding secrets even
+        // though the QR scanned cleanly. When the corrected stream is available,
+        // adopt it and recompute the true ECC from it.
+        let knownErrors = null;
+        let errorsUnknown = false;
         try {
-            qrData = QRParser.parseBest(modules, expectedText);
+            if (rawBytes && rawBytes.length && qrData.version) {
+                // Match the corrected stream against the parsed ECC level first.
+                // If the lengths disagree, scan the other levels: data-codeword
+                // counts are unique per level for a given version, so the length
+                // of the corrected stream pins down the true level even when a
+                // glossy/engraved/low-contrast code makes the sampled format
+                // info unreadable and the grid parses under the wrong level.
+                let blockInfo = null;
+                let eccLevelOverridden = false;
+                for (const level of [qrData.eccLevel, 'L', 'M', 'Q', 'H']) {
+                    if (!level) continue;
+                    try {
+                        const candidate = computeBlockInfo(qrData.version, level);
+                        if (candidate.dataCodewords === rawBytes.length) {
+                            blockInfo = candidate;
+                            eccLevelOverridden = level !== qrData.eccLevel;
+                            if (eccLevelOverridden) qrData.eccLevel = level;
+                            break;
+                        }
+                    } catch (_) { /* level table missing for this version */ }
+                }
 
-            trimmedModules = QRParser.trimQuietZone(modules);
-        } catch (e) {
-            console.error('QR parsing failed:', e);
-            qrData = {
-                version: 5, size: 37, eccLevel: 'H', mask: 0,
-                dataCodewords: [], eccCodewords: [], eccSpec: null
-            };
+                if (blockInfo) {
+                    const corrected = Array.from(rawBytes, b => b & 0xFF);
+                    const sampled = qrData.dataCodewords || [];
+                    const sampledEcc = qrData.eccCodewords || [];
+
+                    if (!eccLevelOverridden && sampled.length === corrected.length && sampledEcc.length) {
+                        // Independently sampled grid under the right level: report
+                        // the exact number of damaged codewords — data bytes that
+                        // differ from the corrected stream, plus ECC bytes that
+                        // differ from RS(data).
+                        let dataErrors = 0;
+                        for (let i = 0; i < corrected.length; i++) {
+                            if (sampled[i] !== corrected[i]) dataErrors++;
+                        }
+                        knownErrors = dataErrors +
+                            (countEccMismatches(corrected, sampledEcc, blockInfo) || 0);
+                    } else {
+                        // Misparsed grid, wrong-level parse, or no grid at all:
+                        // the corrected bytes are authoritative but there is no
+                        // valid sampled stream to diff against, so the physical
+                        // error count is unknown.
+                        errorsUnknown = true;
+                    }
+
+                    qrData.dataCodewords = corrected;
+                    qrData.eccCodewords = recomputeBlockEcc(corrected, blockInfo);
+                }
+            }
+        } catch (_) {
+            // correction bookkeeping failed — keep the sampled stream as-is
         }
 
         // Compute where message data ends and QR padding bytes (0xEC/0x11) begin.
-        // Formula mirrors QRParser.extractPaddingSecret: mode(4b) + cc(8b for v≤9, 16b otherwise) + data bytes
+        // Delegates to the mode-aware segment walker so numeric/alphanumeric/kanji
+        // QR codes resolve correctly, not just byte mode.
         function _paddingOffset(data, version) {
             if (!data || data.length === 0) return 0;
-            const ccBits = version <= 9 ? 8 : 16;
-            const firstByte = data[0];
-            let decoyLen;
-            if (ccBits === 8) {
-                const count_msb = firstByte & 0x0F;
-                const count_lsb = (data[1] >> 4) & 0x0F;
-                decoyLen = (count_msb << 4) | count_lsb;
-            } else {
-                decoyLen = ((data[1] & 0x0F) << 8) | data[2];
-            }
-            const capacityBits = data.length * 8;
-            const usedBits = 4 + ccBits + 8 * decoyLen;
-            const termBits = Math.min(4, capacityBits - usedBits);
-            const afterTerm = usedBits + termBits;
-            const padStartBit = afterTerm + ((-afterTerm) % 8);
-            return Math.min(Math.floor(padStartBit / 8), data.length);
+            const padStart = QRParser.findPaddingStart(data, version);
+            return padStart >= 0 ? padStart : data.length;
         }
 
         const result = {
@@ -934,7 +1072,17 @@ const QRStego = {
         };
 
         try {
-            if (qrData.version && qrData.eccLevel && qrData.dataCodewords?.length && qrData.eccCodewords?.length) {
+            if (knownErrors !== null) {
+                // Exact damaged-codeword count from comparing the sampled grid
+                // against the decoder's corrected stream — works even when the
+                // damage exceeds what Berlekamp-Massey alone could attribute.
+                result.errorsFound = knownErrors;
+            } else if (errorsUnknown) {
+                // ECC was synthesized from corrected data (no sampled grid, or a
+                // wrong-level parse), so a BM pass would always report 0 — the
+                // true error count is unknown.
+                result.errorsFound = null;
+            } else if (qrData.version && qrData.eccLevel && qrData.dataCodewords?.length && qrData.eccCodewords?.length) {
                 const blockInfo = computeBlockInfo(qrData.version, qrData.eccLevel);
                 result.errorsFound = countCorrectableCodewordErrors(
                     qrData.dataCodewords, qrData.eccCodewords, blockInfo
@@ -964,13 +1112,6 @@ const QRStego = {
                 // Suffix format over deinterleaved ECC bytes in block order:
                 // final byte = length; previous length bytes = reversed secret.
 
-                result.eccDebug = {
-                    eccCodewords: Array.from(eccCodewords),
-                    eccPerBlock: blockInfo.eccPerBlock,
-                    dataBlockLens: [...blockInfo.dataBlockLens],
-                    secretLengthByte: eccCodewords[eccCodewords.length - 1]
-                };
-
                 const secretLen = eccCodewords[eccCodewords.length - 1];
                 if (secretLen > 0 && 1 + secretLen <= eccCodewords.length) {
                     try {
@@ -998,6 +1139,48 @@ const QRStego = {
         }
 
         return result;
+    },
+
+    /**
+     * Rebuilds the module grid from the native (Vision) scanner's rectified QR crop.
+     * The crop is already a straight-on, 1:1 image of the symbol (Swift used
+     * CIPerspectiveCorrection against Vision's own corner points), so this just reads
+     * each module's center pixel — no further perspective transform is needed here.
+     */
+    async sampleModulesFromRectifiedImage(dataUrl, moduleCount) {
+        const img = await new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = () => reject(new Error('Failed to load rectified QR image'));
+            image.src = dataUrl;
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const w = canvas.width, h = canvas.height;
+        const imgData = ctx.getImageData(0, 0, w, h).data;
+
+        const cellW = w / moduleCount;
+        const cellH = h / moduleCount;
+        const readLuma = (col, row) => {
+            const px = Math.min(w - 1, Math.floor((col + 0.5) * cellW));
+            const py = Math.min(h - 1, Math.floor((row + 0.5) * cellH));
+            const i = (py * w + px) * 4;
+            return (imgData[i] + imgData[i + 1] + imgData[i + 2]) / 3;
+        };
+        // Finder-calibrated threshold/polarity — see calibrateModulePolarity.
+        const { threshold, invert } = calibrateModulePolarity(readLuma, moduleCount);
+        const modules = [];
+        for (let row = 0; row < moduleCount; row++) {
+            modules[row] = [];
+            for (let col = 0; col < moduleCount; col++) {
+                modules[row][col] = (readLuma(col, row) < threshold) !== invert;
+            }
+        }
+        return modules;
     },
 
 };

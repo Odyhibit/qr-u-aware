@@ -27,12 +27,20 @@ let _lastDetectionAt = 0;
 let _autoConfirmTimer = null;
 let _stableText = null;
 let _stableDecodeCount = 0;
+let _usingNativeDetection = false;
+let _nativeDetecting = false;
+let _nativeListener = null;
+let _smoothedCorners = null;
+let _nativeCaps = null;
 
 // How long the highlight stays visible before auto-confirming.
 const AUTO_CONFIRM_DELAY_MS = 450;
 const DETECTION_GRACE_MS = 500;
-const AUTO_CONFIRM_FRESHNESS_MS = 200;
+const AUTO_CONFIRM_FRESHNESS_MS = 650;
 const STABLE_DECODE_FRAMES = 2;
+// Fraction of the distance to the new corner positions covered each frame — lower is
+// smoother/laggier, higher is snappier/more jittery.
+const CORNER_SMOOTHING = 0.55;
 
 // Intercepts ZXing's internal GridSampler to capture the perspective-corrected
 // BitMatrix (the clean boolean module grid) before it's consumed by the decoder.
@@ -66,7 +74,24 @@ async function startScanner(videoEl, canvasEl, overlayEl, onConfirm) {
     _autoConfirmTimer = null;
     _stableText = null;
     _stableDecodeCount = 0;
+    _usingNativeDetection = false;
+    _nativeDetecting = false;
+    _smoothedCorners = null;
+    _nativeCaps = null;
     videoEl.classList.remove('video-ready');
+
+    _usingNativeDetection = _shouldUseNativeDetection();
+    if (_usingNativeDetection) {
+        try {
+            await _startNativeLiveScanner(videoEl, canvasEl);
+            return;
+        } catch (_) {
+            // Native camera failed to start (AV session error, etc.) — fall
+            // back to the web scanner rather than leaving a dead camera view.
+            // Permission errors resurface below via getUserMedia.
+            _usingNativeDetection = false;
+        }
+    }
 
     if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Camera not available. iOS Simulator has no camera — test on a real device.');
@@ -102,6 +127,90 @@ async function startScanner(videoEl, canvasEl, overlayEl, onConfirm) {
     _tick(videoEl, canvasEl);
 }
 
+// iOS always scans with the native Vision detector; the ZXing web path remains
+// for browsers and (for now) Android — revisit once the Android native
+// detector is in place.
+function _shouldUseNativeDetection() {
+    if (window.Capacitor?.getPlatform?.() !== 'ios') return false;
+    const plugin = _nativeDetectorPlugin();
+    return Boolean(plugin && typeof plugin.start === 'function');
+}
+
+function _nativeDetectorPlugin() {
+    return window.Capacitor?.Plugins?.NativeBarcodeDetector || window.NativeBarcodeDetector || null;
+}
+
+async function _startNativeLiveScanner(videoEl, canvasEl) {
+    const plugin = _nativeDetectorPlugin();
+    if (!plugin || typeof plugin.start !== 'function') {
+        throw new Error('Native scanner is not available on this platform.');
+    }
+
+    document.documentElement.classList.add('native-camera-active');
+    document.body.classList.add('native-camera-active');
+    document.getElementById('view-scanner')?.classList.add('native-camera-active');
+    videoEl.classList.add('video-ready');
+
+    _nativeListener = await plugin.addListener('barcodeDetected', result => {
+        if (!_usingNativeDetection) return;
+        if (!result?.text) {
+            _handleDecodeMiss();
+            return;
+        }
+
+        const rawBytes = Array.isArray(result.rawBytes) && result.rawBytes.length
+            ? Uint8Array.from(result.rawBytes)
+            : null;
+        // Vision's CIQRCodeDescriptor exposes version/mask/ECC level directly, so the
+        // raw-data view can still show those (and derive the padding secret from
+        // rawBytes) even without a module grid — see QRStego.decode()'s nativeMeta path.
+        const nativeMeta = (typeof result.version === 'number' && result.eccLevel)
+            ? { version: result.version, mask: result.mask, eccLevel: result.eccLevel }
+            : null;
+        _acceptDecodedResult(videoEl, canvasEl, {
+            text: result.text,
+            bitMatrix: null,
+            rawModules: null,
+            rawBytes,
+            nativeMeta,
+            moduleImage: result.moduleImage || null,
+            moduleCount: result.moduleCount || null,
+            snap: null,
+            detectedAt: performance.now(),
+            viewportCorners: result.corners || null
+        });
+    });
+
+    try {
+        _nativeCaps = await plugin.start({ previewRect: _nativePreviewRect() });
+        _zoomValue = _getCurrentZoom();
+        _setupTorchButton();
+        _setupPinchZoom(videoEl);
+    } catch (err) {
+        if (_nativeListener) {
+            _nativeListener.remove();
+            _nativeListener = null;
+        }
+        document.documentElement.classList.remove('native-camera-active');
+        document.body.classList.remove('native-camera-active');
+        document.getElementById('view-scanner')?.classList.remove('native-camera-active');
+        videoEl.classList.remove('video-ready');
+        _usingNativeDetection = false;
+        throw err;
+    }
+}
+
+function _nativePreviewRect() {
+    const rect = (document.getElementById('view-scanner') || _overlayEl)?.getBoundingClientRect();
+    if (!rect) return null;
+    return {
+        x: rect.left,
+        y: rect.top,
+        width: rect.width,
+        height: rect.height
+    };
+}
+
 function _waitForVideoMetadata(videoEl) {
     if (videoEl.readyState >= videoEl.HAVE_METADATA && videoEl.videoWidth && videoEl.videoHeight) {
         return Promise.resolve();
@@ -131,6 +240,9 @@ function _getCameraCapabilities(track) {
 }
 
 function _getCurrentZoom() {
+    if (_usingNativeDetection) {
+        return _nativeCaps && typeof _nativeCaps.minZoom === 'number' ? _nativeCaps.minZoom : 1;
+    }
     const zoomCaps = _cameraCaps?.zoom;
     const settings = typeof _videoTrack?.getSettings === 'function' ? _videoTrack.getSettings() : {};
     if (typeof settings.zoom === 'number') return settings.zoom;
@@ -149,6 +261,7 @@ function _setupTorchButton() {
 }
 
 function _supportsTorch() {
+    if (_usingNativeDetection) return Boolean(_nativeCaps && _nativeCaps.hasTorch);
     return Boolean(_videoTrack && _cameraCaps && _cameraCaps.torch);
 }
 
@@ -160,8 +273,13 @@ async function _toggleTorch() {
 async function _setTorch(on) {
     if (!_supportsTorch()) return;
     try {
-        await _videoTrack.applyConstraints({ advanced: [{ torch: Boolean(on) }] });
-        _torchOn = Boolean(on);
+        if (_usingNativeDetection) {
+            const result = await _nativeDetectorPlugin()?.setTorch({ on: Boolean(on) });
+            _torchOn = Boolean(result?.on);
+        } else {
+            await _videoTrack.applyConstraints({ advanced: [{ torch: Boolean(on) }] });
+            _torchOn = Boolean(on);
+        }
         _updateTorchButton();
     } catch (err) {
         console.warn('Torch control failed:', err);
@@ -197,9 +315,21 @@ function _teardownPinchZoom() {
     _pinchStartDistance = 0;
 }
 
-function _supportsZoom() {
+// Returns { min, max, step } from whichever camera source is active, or null if
+// zoom isn't available.
+function _zoomRange() {
+    if (_usingNativeDetection) {
+        if (!_nativeCaps || typeof _nativeCaps.minZoom !== 'number' || typeof _nativeCaps.maxZoom !== 'number') return null;
+        return { min: _nativeCaps.minZoom, max: _nativeCaps.maxZoom, step: 0 };
+    }
     const zoomCaps = _cameraCaps?.zoom;
-    return Boolean(_videoTrack && zoomCaps && typeof zoomCaps.min === 'number' && typeof zoomCaps.max === 'number');
+    if (!_videoTrack || !zoomCaps || typeof zoomCaps.min !== 'number' || typeof zoomCaps.max !== 'number') return null;
+    return { min: zoomCaps.min, max: zoomCaps.max, step: zoomCaps.step };
+}
+
+function _supportsZoom() {
+    const range = _zoomRange();
+    return Boolean(range && range.max > range.min);
 }
 
 function _onTouchStart(event) {
@@ -226,11 +356,10 @@ function _touchDistance(a, b) {
 }
 
 function _clampZoom(value) {
-    const zoomCaps = _cameraCaps.zoom;
-    const min = zoomCaps.min;
-    const max = zoomCaps.max;
-    const step = typeof zoomCaps.step === 'number' && zoomCaps.step > 0 ? zoomCaps.step : 0;
-    let next = Math.min(max, Math.max(min, value));
+    const range = _zoomRange();
+    if (!range) return value;
+    const step = typeof range.step === 'number' && range.step > 0 ? range.step : 0;
+    let next = Math.min(range.max, Math.max(range.min, value));
     if (step) next = Math.round(next / step) * step;
     return Number(next.toFixed(4));
 }
@@ -244,12 +373,17 @@ async function _applyZoom(value) {
     if (_zoomApplying) return;
 
     _zoomApplying = true;
-    while (_queuedZoom !== null && _videoTrack) {
+    while (_queuedZoom !== null && (_usingNativeDetection || _videoTrack)) {
         const zoom = _queuedZoom;
         _queuedZoom = null;
         try {
-            await _videoTrack.applyConstraints({ advanced: [{ zoom }] });
-            _zoomValue = zoom;
+            if (_usingNativeDetection) {
+                const result = await _nativeDetectorPlugin()?.setZoom({ zoom });
+                _zoomValue = typeof result?.zoom === 'number' ? result.zoom : zoom;
+            } else {
+                await _videoTrack.applyConstraints({ advanced: [{ zoom }] });
+                _zoomValue = zoom;
+            }
         } catch (err) {
             console.warn('Camera zoom failed:', err);
             _queuedZoom = null;
@@ -311,45 +445,125 @@ function _tick(videoEl, canvasEl) {
             clone.height = canvasEl.height;
             clone.getContext('2d').drawImage(canvasEl, 0, 0);
 
-            const text = result.getText();
-            if (text === _stableText) {
-                _stableDecodeCount++;
-            } else {
-                _stableText = text;
-                _stableDecodeCount = 1;
-                _cancelAutoConfirm();
-            }
-
-            _pendingResult = {
-                text,
+            _acceptDecodedResult(videoEl, canvasEl, {
+                text: result.getText(),
                 bitMatrix: _capturingSampler.lastBits,
                 rawModules: _capturingSampler.lastModules,
                 rawBytes: typeof result.getRawBytes === 'function' ? result.getRawBytes() : null,
                 snap: { canvas: clone, transform: _capturingSampler.lastTransform },
-                detectedAt: performance.now()
-            };
-
-            const points = result.getResultPoints ? result.getResultPoints() : [];
-            _drawHighlight(videoEl, canvasEl, points);
-            _lastDetectionAt = _pendingResult.detectedAt;
-
-            // Start the auto-confirm countdown once per detection window.
-            // The highlight stays visible for AUTO_CONFIRM_DELAY_MS so the user
-            // can see which code was scanned before the result screen appears.
-            if (_stableDecodeCount >= STABLE_DECODE_FRAMES && !_autoConfirmTimer) {
-                _autoConfirmTimer = setTimeout(_fireAutoConfirm, AUTO_CONFIRM_DELAY_MS);
-            }
+                detectedAt: performance.now(),
+                points: result.getResultPoints ? result.getResultPoints() : []
+            });
         } catch (_) {
-            _pendingResult = null;
-            _stableText = null;
-            _stableDecodeCount = 0;
-            _cancelAutoConfirm();
-            if (performance.now() - _lastDetectionAt > DETECTION_GRACE_MS) {
-                _clearHighlight();
-            }
+            _handleDecodeMiss();
         }
     }
     _animFrame = requestAnimationFrame(() => _tick(videoEl, canvasEl));
+}
+
+function _tickNative(videoEl, canvasEl) {
+    if (videoEl.readyState === videoEl.HAVE_ENOUGH_DATA) {
+        const ctx = canvasEl.getContext('2d', { willReadFrequently: true });
+
+        if (canvasEl.width !== videoEl.videoWidth || canvasEl.height !== videoEl.videoHeight) {
+            canvasEl.width = videoEl.videoWidth;
+            canvasEl.height = videoEl.videoHeight;
+        }
+        ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+
+        const plugin = _nativeDetectorPlugin();
+        if (!_nativeDetecting && plugin) {
+            const clone = document.createElement('canvas');
+            clone.width = canvasEl.width;
+            clone.height = canvasEl.height;
+            clone.getContext('2d').drawImage(canvasEl, 0, 0);
+
+            _nativeDetecting = true;
+            plugin.detect({ image: canvasEl.toDataURL('image/jpeg', 0.65) })
+                .then(result => {
+                    if (!_stream || !_usingNativeDetection) return;
+                    if (!result?.found || !result.text) {
+                        _handleDecodeMiss();
+                        return;
+                    }
+
+                    const rawBytes = Array.isArray(result.rawBytes) && result.rawBytes.length
+                        ? Uint8Array.from(result.rawBytes)
+                        : null;
+                    _acceptDecodedResult(videoEl, canvasEl, {
+                        text: result.text,
+                        bitMatrix: null,
+                        rawModules: null,
+                        rawBytes,
+                        snap: { canvas: clone, transform: null },
+                        detectedAt: performance.now(),
+                        corners: result.corners || null
+                    });
+                })
+                .catch(() => {
+                    if (_stream && _usingNativeDetection) _handleDecodeMiss();
+                })
+                .finally(() => {
+                    _nativeDetecting = false;
+                });
+        }
+    }
+    _animFrame = requestAnimationFrame(() => _tickNative(videoEl, canvasEl));
+}
+
+function _acceptDecodedResult(videoEl, canvasEl, result) {
+    if (result.text === _stableText) {
+        _stableDecodeCount++;
+    } else {
+        _stableText = result.text;
+        _stableDecodeCount = 1;
+        _cancelAutoConfirm();
+        // A different code may be in a completely different spot — snap to it
+        // instead of sliding the outline over from the old code's position.
+        _smoothedCorners = null;
+    }
+
+    _pendingResult = {
+        text: result.text,
+        bitMatrix: result.bitMatrix || null,
+        rawModules: result.rawModules || null,
+        rawBytes: result.rawBytes || null,
+        nativeMeta: result.nativeMeta || null,
+        moduleImage: result.moduleImage || null,
+        moduleCount: result.moduleCount || null,
+        snap: result.snap || null,
+        detectedAt: result.detectedAt || performance.now()
+    };
+
+    if (result.viewportCorners) {
+        _drawViewportCornersHighlight(result.viewportCorners);
+    } else if (result.corners) {
+        _drawCornersHighlight(videoEl, canvasEl, result.corners);
+    } else {
+        _drawHighlight(videoEl, canvasEl, result.points || []);
+    }
+    _lastDetectionAt = _pendingResult.detectedAt;
+
+    // Start the auto-confirm countdown once per detection window.
+    // The highlight stays visible for AUTO_CONFIRM_DELAY_MS so the user
+    // can see which code was scanned before the result screen appears.
+    if (_stableDecodeCount >= STABLE_DECODE_FRAMES && !_autoConfirmTimer) {
+        _autoConfirmTimer = setTimeout(_fireAutoConfirm, AUTO_CONFIRM_DELAY_MS);
+    }
+}
+
+function _handleDecodeMiss() {
+    // A marginal/damaged code can read successfully but not on every single frame — only
+    // give up on it (and lose the accumulated stability count) once the misses persist
+    // past the grace window, rather than resetting on the very first missed frame. A
+    // one-off miss between good reads shouldn't restart the confirmation countdown.
+    if (performance.now() - _lastDetectionAt > DETECTION_GRACE_MS) {
+        _pendingResult = null;
+        _stableText = null;
+        _stableDecodeCount = 0;
+        _cancelAutoConfirm();
+        _clearHighlight();
+    }
 }
 
 function _cancelAutoConfirm() {
@@ -389,6 +603,21 @@ function _getDisplayTransform(videoEl, canvasEl) {
         oX = 0; oY = (dH - vH * sY) / 2;
     }
     return { scaleX: sX, scaleY: sY, offsetX: oX, offsetY: oY };
+}
+
+// Eases the outline toward each new detection instead of snapping straight to it, so
+// per-frame decode jitter doesn't read as the box jumping around. First call (or a call
+// after _smoothedCorners was reset) snaps immediately since there's nothing to ease from.
+function _smoothCorners(rawCorners) {
+    if (!_smoothedCorners || _smoothedCorners.length !== rawCorners.length) {
+        _smoothedCorners = rawCorners.map(p => ({ x: p.x, y: p.y }));
+        return _smoothedCorners;
+    }
+    _smoothedCorners = rawCorners.map((p, i) => ({
+        x: _smoothedCorners[i].x + (p.x - _smoothedCorners[i].x) * CORNER_SMOOTHING,
+        y: _smoothedCorners[i].y + (p.y - _smoothedCorners[i].y) * CORNER_SMOOTHING
+    }));
+    return _smoothedCorners;
 }
 
 // Draws an outline around the detected QR code.
@@ -431,7 +660,83 @@ function _drawHighlight(videoEl, canvasEl, points) {
         return null;
     }
 
-    const [c0, c1, c2, c3] = corners;
+    const [c0, c1, c2, c3] = _smoothCorners(corners);
+    ctx.beginPath();
+    ctx.moveTo(c0.x, c0.y);
+    ctx.lineTo(c1.x, c1.y);
+    ctx.lineTo(c2.x, c2.y);
+    ctx.lineTo(c3.x, c3.y);
+    ctx.closePath();
+    ctx.strokeStyle = '#7c6fff';
+    ctx.lineWidth = 4;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    return {
+        centerX: (c0.x + c1.x + c2.x + c3.x) / 4,
+        bottomY:  Math.max(c0.y, c1.y, c2.y, c3.y)
+    };
+}
+
+function _drawCornersHighlight(videoEl, canvasEl, frameCorners) {
+    if (!_overlayEl || !Array.isArray(frameCorners) || frameCorners.length < 4) return null;
+
+    const dW = videoEl.clientWidth, dH = videoEl.clientHeight;
+    if (_overlayEl.width !== dW || _overlayEl.height !== dH) {
+        _overlayEl.width = dW;
+        _overlayEl.height = dH;
+    }
+
+    const ctx = _overlayEl.getContext('2d');
+    ctx.clearRect(0, 0, dW, dH);
+
+    const { scaleX, scaleY, offsetX, offsetY } = _getDisplayTransform(videoEl, canvasEl);
+    const corners = frameCorners.slice(0, 4).map(p => ({
+        x: Number(p.x) * scaleX + offsetX,
+        y: Number(p.y) * scaleY + offsetY
+    }));
+    if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+
+    const [c0, c1, c2, c3] = _smoothCorners(corners);
+    ctx.beginPath();
+    ctx.moveTo(c0.x, c0.y);
+    ctx.lineTo(c1.x, c1.y);
+    ctx.lineTo(c2.x, c2.y);
+    ctx.lineTo(c3.x, c3.y);
+    ctx.closePath();
+    ctx.strokeStyle = '#7c6fff';
+    ctx.lineWidth = 4;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+
+    return {
+        centerX: (c0.x + c1.x + c2.x + c3.x) / 4,
+        bottomY:  Math.max(c0.y, c1.y, c2.y, c3.y)
+    };
+}
+
+function _drawViewportCornersHighlight(viewportCorners) {
+    if (!_overlayEl || !Array.isArray(viewportCorners) || viewportCorners.length < 4) return null;
+
+    const dW = _overlayEl.clientWidth, dH = _overlayEl.clientHeight;
+    if (_overlayEl.width !== dW || _overlayEl.height !== dH) {
+        _overlayEl.width = dW;
+        _overlayEl.height = dH;
+    }
+
+    const rect = _overlayEl.getBoundingClientRect();
+    const corners = viewportCorners.slice(0, 4).map(p => ({
+        x: Number(p.x) - rect.left,
+        y: Number(p.y) - rect.top
+    }));
+    if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+
+    const ctx = _overlayEl.getContext('2d');
+    ctx.clearRect(0, 0, _overlayEl.width, _overlayEl.height);
+
+    const [c0, c1, c2, c3] = _smoothCorners(corners);
     ctx.beginPath();
     ctx.moveTo(c0.x, c0.y);
     ctx.lineTo(c1.x, c1.y);
@@ -451,6 +756,7 @@ function _drawHighlight(videoEl, canvasEl, points) {
 }
 
 function _clearHighlight() {
+    _smoothedCorners = null;
     if (!_overlayEl) return;
     const ctx = _overlayEl.getContext('2d');
     ctx.clearRect(0, 0, _overlayEl.width, _overlayEl.height);
@@ -461,7 +767,7 @@ function confirmScan() {
     const r = _pendingResult;
     _pendingResult = null;
     stopScanner();
-    if (_onConfirm) _onConfirm(r.text, r.bitMatrix, r.rawBytes, r.snap, r.rawModules);
+    if (_onConfirm) _onConfirm(r);
 }
 
 function _snapshotBitMatrix(bitMatrix) {
@@ -475,6 +781,18 @@ function _snapshotBitMatrix(bitMatrix) {
 
 function stopScanner() {
     _cancelAutoConfirm();
+    if (_nativeListener) {
+        _nativeListener.remove();
+        _nativeListener = null;
+    }
+    if (_usingNativeDetection) {
+        try {
+            _nativeDetectorPlugin()?.stop?.();
+        } catch (_) {}
+    }
+    document.documentElement.classList.remove('native-camera-active');
+    document.body.classList.remove('native-camera-active');
+    document.getElementById('view-scanner')?.classList.remove('native-camera-active');
     _teardownPinchZoom();
     if (_torchBtn) {
         _torchBtn.onclick = null;
@@ -491,10 +809,13 @@ function stopScanner() {
     }
     _videoTrack = null;
     _cameraCaps = null;
+    _nativeCaps = null;
     _torchBtn = null;
     _torchOn = false;
     _zoomApplying = false;
     _queuedZoom = null;
+    _usingNativeDetection = false;
+    _nativeDetecting = false;
     if (_canvasEl) _canvasEl.width = _canvasEl.height = 0;
     document.getElementById('scanner-video')?.classList.remove('video-ready');
     _pendingResult = null;
@@ -505,7 +826,7 @@ function stopScanner() {
 }
 
 function isScannerActive() {
-    return !!_stream;
+    return !!_stream || _usingNativeDetection;
 }
 
 window.Scanner = { startScanner, stopScanner, isScannerActive };
