@@ -303,13 +303,17 @@ function _computeSimpleVerdict(scan) {
         return { level: 'caution', icon: '⚠', text: 'Use Caution', sub: _simpleDomain(scan) };
     }
 
-    // GSB is the primary check — if it didn't actually complete, "Looks Safe"
-    // would overstate our confidence even when no other signal is bad.
-    if (scan.googleVerdict === 'Check failed') {
-        return { level: 'unreachable', icon: '?', text: 'Google Safe Browsing Check Failed', sub: _simpleDomain(scan) };
-    }
-    if (scan.googleVerdict === 'Partially checked') {
-        return { level: 'unreachable', icon: '?', text: 'Google Safe Browsing Partially Checked', sub: _simpleDomain(scan) };
+    // GSB is the primary check — only say "Looks Safe" once it actually
+    // confirmed the link is clean. Any other outcome — no key configured
+    // (e.g. this web build, which never ships the real key), a failed/partial
+    // request, or the user skipping the check-Google prompt — means we don't
+    // actually know, and showing the same confident "safe" text would
+    // overstate that even when no other signal came back bad.
+    if (scan.googleVerdict !== 'Not known malicious') {
+        const text = scan.googleVerdict === 'Check failed' ? 'Google Safe Browsing Check Failed'
+            : scan.googleVerdict === 'Partially checked' ? 'Google Safe Browsing Partially Checked'
+            : 'Google Safe Browsing Not Checked';
+        return { level: 'unreachable', icon: '?', text, sub: _simpleDomain(scan) };
     }
 
     return { level: 'safe', icon: '✓', text: 'Looks Safe', sub: _simpleDomain(scan) };

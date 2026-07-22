@@ -28,6 +28,20 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+      # www/js/secrets.js is gitignored (never committed — see .gitignore),
+      # so it's never in this checkout. Write it here instead, from a repo
+      # secret, so the real key value only ever lives in GitHub's encrypted
+      # secret store and the deployed site — never in git history.
+      - name: Write web secrets.js
+        env:
+          GSB_WEB_API_KEY: ${{ secrets.GSB_WEB_API_KEY }}
+        run: |
+          cat > www/js/secrets.js << EOF
+          if (window.QR_STEGO_CONFIG) {
+              window.QR_STEGO_CONFIG.googleSafeBrowsingApiKey = '${GSB_WEB_API_KEY}';
+          }
+          EOF
+
       # Publishes www/ as-is — it's the app's actual source, not a build
       # output, so there's no build step here.
       - name: Upload www/ as Pages artifact
