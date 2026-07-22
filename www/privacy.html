@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — QR U Aware</title>
+<style>
+* { box-sizing: border-box; }
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d0d0f;
+    color: #e8e8ed;
+    line-height: 1.6;
+}
+.wrap {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 40px 20px 80px;
+}
+h1 {
+    font-size: 26px;
+    font-weight: 800;
+    margin: 0 0 6px;
+}
+.updated {
+    color: #999;
+    font-size: 13px;
+    margin-bottom: 32px;
+}
+h2 {
+    font-size: 18px;
+    font-weight: 700;
+    color: #cfc9ff;
+    margin: 36px 0 10px;
+    padding-top: 8px;
+    border-top: 1px solid #23232c;
+}
+h2:first-of-type { border-top: none; padding-top: 0; }
+p, li { color: #cfcfd6; font-size: 15px; }
+ul { padding-left: 20px; }
+li { margin-bottom: 6px; }
+strong { color: #e8e8ed; }
+a { color: #9c92ff; }
+code {
+    background: #1a1a22;
+    border: 1px solid #2a2a35;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 13px;
+    color: #c8c0ff;
+}
+.summary-box {
+    background: #101a13;
+    border: 1px solid #1a3a25;
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 8px;
+}
+.summary-box p { color: #8fd6a8; margin: 0; font-size: 14px; }
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+    font-size: 14px;
+}
+.table th, .table td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid #23232c;
+    vertical-align: top;
+}
+.table th { color: #999; font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.table td { color: #cfcfd6; }
+footer { color: #777; font-size: 13px; margin-top: 48px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>QR U Aware — Privacy Policy</h1>
+<div class="updated">Last updated: July 21, 2026</div>
+
+<div class="summary-box">
+<p><strong>In short:</strong> QR U Aware analyzes and decodes QR codes entirely on your device. There is no account, no ad tracking, and no analytics of any kind. Your scan history never leaves your device. The only data that goes anywhere else is a scanned URL — and only when you've enabled or approved a specific safety check, sent directly from your device to that check's provider (Google, VirusTotal, etc.), never through a server we operate.</p>
+</div>
+
+<h2>What this app does</h2>
+<p>QR U Aware scans QR codes with your device's camera, decodes their contents, and — for QR codes containing a web link — offers to run safety checks so you can judge whether it's safe to open.</p>
+
+<h2>Information we do not collect</h2>
+<p>We (the developer) do not operate any backend server for this app. There is nothing for us to collect. Specifically:</p>
+<ul>
+<li>No account, sign-up, or login is required or offered.</li>
+<li>No analytics, crash reporting, or advertising SDKs are included in the app.</li>
+<li>No ads are shown.</li>
+<li>We have no way to see what you scan, your device identifiers, or your location.</li>
+</ul>
+
+<h2>Information processed on your device</h2>
+<p>The following happens entirely locally and is never transmitted anywhere:</p>
+<ul>
+<li><strong>Camera feed</strong> — used only to detect and decode QR codes in view. Frames are analyzed on-device and discarded.</li>
+<li><strong>QR code decoding</strong> — the app inspects the QR code's data and error-correction bytes. This analysis is entirely local.</li>
+<li><strong>Local link checks</strong> — things like detecting embedded credentials in a URL, lookalike (punycode) domains, IP-address links, or links pointing at private/local network addresses are all computed on-device with no network request.</li>
+<li><strong>Scan history</strong> — every scan (content, decoded type, and the results of any safety checks you ran) is saved in local on-device storage so you can review it later. This history is never uploaded. You can delete individual scans or clear all history at any time from the History tab.</li>
+</ul>
+
+<h2>Information sent to third parties</h2>
+<p>The app can perform optional online safety checks on scanned links. Each is controlled from Settings, and each network request — when not set to run automatically — asks for your confirmation first, telling you what it's about to send and to whom. Nothing below is sent unless the corresponding check runs.</p>
+
+<table class="table">
+<tr><th>Check</th><th>What's sent</th><th>Sent to</th></tr>
+<tr>
+<td>Redirect resolution</td>
+<td>The scanned URL, in order to follow it and find its final destination</td>
+<td>Whatever server the URL points to (the link's own host, or a link-shortener's API)</td>
+</tr>
+<tr>
+<td>Google Safe Browsing</td>
+<td>The scanned or resolved URL, plus this app's bundle/package identifier (used only to enforce our API key's usage restrictions, not to identify you)</td>
+<td><a href="https://safebrowsing.google.com/">Google Safe Browsing</a> (<a href="https://policies.google.com/privacy">Google Privacy Policy</a>)</td>
+</tr>
+<tr>
+<td>Domain age lookup</td>
+<td>Just the domain name (not the full URL or any other scan content)</td>
+<td>The domain's public registry, via the IANA RDAP directory — the same kind of public lookup a WHOIS query performs</td>
+</tr>
+<tr>
+<td>VirusTotal (optional)</td>
+<td>The final destination URL</td>
+<td><a href="https://www.virustotal.com/">VirusTotal</a> (<a href="https://support.virustotal.com/hc/en-us/articles/115002168385-Privacy-Policy">VirusTotal Privacy Policy</a>) — VirusTotal notes that submitted URLs may be shared with its security-community partners</td>
+</tr>
+</table>
+
+<p>The VirusTotal check additionally requires you to supply your own free VirusTotal API key in Settings — it never runs without one.</p>
+
+<p>None of these requests pass through a server we control — your device talks directly to the provider above.</p>
+
+<h2>API keys and secure storage</h2>
+<p>If you enter your own VirusTotal API key, it's stored using your device's secure storage — the iOS Keychain or Android's Keystore-backed secure storage on native builds, or encrypted browser storage on the web version. Keys are never transmitted anywhere except as needed to authenticate the corresponding request above.</p>
+
+<h2>Your controls</h2>
+<ul>
+<li>Every online check (redirect resolution, Google Safe Browsing, domain age, VirusTotal) can be switched between automatic and ask-first in Settings, or left off entirely.</li>
+<li>Simple Mode shows a plain safe/caution/danger verdict; Advanced Mode shows the full technical detail behind it — your choice, in Settings.</li>
+<li>You can clear your saved API keys or your entire scan history at any time from Settings and History.</li>
+<li>Uninstalling the app removes all locally stored data, including scan history and saved keys.</li>
+</ul>
+
+<h2>Children's privacy</h2>
+<p>QR U Aware is not directed at children under 13, and we do not knowingly collect information from children. As noted above, we don't operate a server or collect information from any user, of any age.</p>
+
+<h2>Changes to this policy</h2>
+<p>If this policy changes, the "Last updated" date at the top of this page will change too. Significant changes will also be reflected in the app's release notes.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy or the app can be sent to <a href="mailto:REPLACE_WITH_CONTACT_EMAIL">REPLACE_WITH_CONTACT_EMAIL</a>.</p>
+
+<footer>QR U Aware · <a href="index.html">Open the app</a></footer>
+
+</div>
+</body>
+</html>

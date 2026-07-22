@@ -35,6 +35,12 @@ let _nativeCaps = null;
 
 // How long the highlight stays visible before auto-confirming.
 const AUTO_CONFIRM_DELAY_MS = 450;
+// Android's native path waits on a follow-up capture+decode after this timer
+// fires (see _enrichNativeResultBeforeConfirm) — the highlight stays visible
+// through that wait too (confirmScan()/stopScanner() doesn't run until after
+// it resolves), so the upfront dwell can be much shorter there than on
+// iOS/web, where confirming ends the highlight immediately.
+const AUTO_CONFIRM_DELAY_NATIVE_ENRICH_MS = 150;
 const DETECTION_GRACE_MS = 500;
 const AUTO_CONFIRM_FRESHNESS_MS = 650;
 const STABLE_DECODE_FRAMES = 2;
@@ -80,6 +86,17 @@ async function startScanner(videoEl, canvasEl, overlayEl, onConfirm) {
     _nativeCaps = null;
     videoEl.classList.remove('video-ready');
 
+    // Always set up, regardless of path: a confirmed Android native detection
+    // needs these to run one ZXing decode pass on a captured still — see
+    // _enrichNativeResultBeforeConfirm(). Harmless/unused on iOS.
+    _capturingSampler = new CapturingGridSampler();
+    ZXing.GridSamplerInstance.setGridSampler(_capturingSampler);
+    _qrReader = new ZXing.QRCodeReader();
+    _decodeHints = new Map([
+        [ZXing.DecodeHintType.TRY_HARDER, true],
+        [ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]],
+    ]);
+
     _usingNativeDetection = _shouldUseNativeDetection();
     if (_usingNativeDetection) {
         try {
@@ -114,24 +131,18 @@ async function startScanner(videoEl, canvasEl, overlayEl, onConfirm) {
     await _waitForStablePaint();
     videoEl.classList.add('video-ready');
 
-    _capturingSampler = new CapturingGridSampler();
-    ZXing.GridSamplerInstance.setGridSampler(_capturingSampler);
-    _qrReader = new ZXing.QRCodeReader();
-    _decodeHints = new Map([
-        [ZXing.DecodeHintType.TRY_HARDER, true],
-        [ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]],
-    ]);
-
     _setupTorchButton();
     _setupPinchZoom(videoEl);
     _tick(videoEl, canvasEl);
 }
 
-// iOS always scans with the native Vision detector; the ZXing web path remains
-// for browsers and (for now) Android — revisit once the Android native
-// detector is in place.
+// iOS and Android both scan with the native detector (Vision / CameraX+ML Kit);
+// browsers and other contexts fall back to the ZXing web path below. Android's
+// detector only supplies live text+corners (no codeword data — see
+// _enrichNativeResultBeforeConfirm), unlike iOS's Vision which supplies both.
 function _shouldUseNativeDetection() {
-    if (window.Capacitor?.getPlatform?.() !== 'ios') return false;
+    const platform = window.Capacitor?.getPlatform?.();
+    if (platform !== 'ios' && platform !== 'android') return false;
     const plugin = _nativeDetectorPlugin();
     return Boolean(plugin && typeof plugin.start === 'function');
 }
@@ -544,11 +555,17 @@ function _acceptDecodedResult(videoEl, canvasEl, result) {
     }
     _lastDetectionAt = _pendingResult.detectedAt;
 
-    // Start the auto-confirm countdown once per detection window.
-    // The highlight stays visible for AUTO_CONFIRM_DELAY_MS so the user
-    // can see which code was scanned before the result screen appears.
+    // Start the auto-confirm countdown once per detection window. The highlight
+    // stays visible for this dwell so the user can see which code was scanned
+    // before the result screen appears — except on Android's native path when
+    // it's about to need _enrichNativeResultBeforeConfirm's capture+decode,
+    // where the highlight already stays up through that extra wait, so a much
+    // shorter dwell here doesn't cost anything visually.
     if (_stableDecodeCount >= STABLE_DECODE_FRAMES && !_autoConfirmTimer) {
-        _autoConfirmTimer = setTimeout(_fireAutoConfirm, AUTO_CONFIRM_DELAY_MS);
+        const needsNativeEnrichment = _usingNativeDetection &&
+            !_pendingResult.bitMatrix && !_pendingResult.rawModules && !_pendingResult.nativeMeta;
+        const delay = needsNativeEnrichment ? AUTO_CONFIRM_DELAY_NATIVE_ENRICH_MS : AUTO_CONFIRM_DELAY_MS;
+        _autoConfirmTimer = setTimeout(_fireAutoConfirm, delay);
     }
 }
 
@@ -572,7 +589,7 @@ function _cancelAutoConfirm() {
     _autoConfirmTimer = null;
 }
 
-function _fireAutoConfirm() {
+async function _fireAutoConfirm() {
     _autoConfirmTimer = null;
     if (!_pendingResult) return;
 
@@ -581,11 +598,71 @@ function _fireAutoConfirm() {
         _pendingResult.text === _stableText &&
         performance.now() - _pendingResult.detectedAt <= AUTO_CONFIRM_FRESHNESS_MS
     ) {
-        confirmScan();
+        await _enrichNativeResultBeforeConfirm();
+        if (_pendingResult) confirmScan();
         return;
     }
 
     _pendingResult = null;
+}
+
+// Android's native plugin only supplies text + corners live (ML Kit doesn't
+// expose codewords the way iOS's Vision does), so right before a scan is
+// confirmed, pull one full-resolution still from the plugin and run it
+// through the same ZXing decode _tick() uses for the web path, to get real
+// bitMatrix/rawModules/rawBytes for stego analysis. No-op for iOS (already
+// has nativeMeta) and for the web path (already has bitMatrix from _tick).
+async function _enrichNativeResultBeforeConfirm() {
+    if (!_pendingResult || !_usingNativeDetection) return;
+    if (_pendingResult.bitMatrix || _pendingResult.rawModules || _pendingResult.nativeMeta) return;
+    const plugin = _nativeDetectorPlugin();
+    if (!plugin || typeof plugin.captureAnalysisFrame !== 'function') return;
+    try {
+        const { image } = await plugin.captureAnalysisFrame();
+        if (!image || !_pendingResult) return;
+        const decoded = await _decodeStillImageDataUrl(image);
+        if (decoded && _pendingResult) {
+            _pendingResult.bitMatrix = decoded.bitMatrix;
+            _pendingResult.rawModules = decoded.rawModules;
+            _pendingResult.rawBytes = decoded.rawBytes;
+        } else {
+            // ML Kit found this live, but our own ZXing decode of the confirm-time
+            // still failed — happens on marginal codes (low-contrast/engraved)
+            // where ML Kit's detector is more tolerant than ours. Result screen
+            // still works with text-only content; Raw QR Data just won't show.
+            console.warn('Native confirm-time decode found no result for a still that ML Kit detected live.');
+        }
+    } catch (err) {
+        console.warn('Native confirm-time enrichment failed:', err);
+    }
+}
+
+// Decodes a single still image (data URL) via the same multi-strategy ZXing
+// pipeline _tick() uses live, for the confirm-time enrichment above.
+function _decodeStillImageDataUrl(dataUrl) {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+            try {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+                const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+                const result = _decodeMultiStrategy(lum);
+                if (!result) { resolve(null); return; }
+                resolve({
+                    bitMatrix: _capturingSampler.lastBits,
+                    rawModules: _capturingSampler.lastModules,
+                    rawBytes: typeof result.getRawBytes === 'function' ? result.getRawBytes() : null
+                });
+            } catch (_) {
+                resolve(null);
+            }
+        };
+        img.onerror = () => resolve(null);
+        img.src = dataUrl;
+    });
 }
 
 // Returns the affine scale/offset that maps video pixel coords to display pixel coords,

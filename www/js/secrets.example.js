@@ -3,5 +3,7 @@
 // but never committed to source control.
 
 if (window.QR_STEGO_CONFIG) {
-    window.QR_STEGO_CONFIG.googleSafeBrowsingApiKey = '';
+    window.QR_STEGO_CONFIG.googleSafeBrowsingApiKey = '';        // iOS-restricted key
+    window.QR_STEGO_CONFIG.googleSafeBrowsingApiKeyAndroid = ''; // Android-restricted key
+    window.QR_STEGO_CONFIG.androidCertSha1 = '';                 // Play app-signing SHA-1
 }

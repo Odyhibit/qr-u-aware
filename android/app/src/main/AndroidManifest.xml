@@ -18,6 +18,17 @@
             android:screenOrientation="portrait"
             android:exported="true">
 
+            <!-- Android 16 (API 36+) ignores fixed-orientation restrictions by default
+                 on large screens (tablets, sw>=600dp) — without this, the scanner's
+                 landscape-shaped camera request was enough to flip the whole activity
+                 to landscape while the camera was active. Opts back into the pre-16
+                 behavior of honoring screenOrientation="portrait" above. Per Google's
+                 docs this escape hatch is removed in API level 37, so this needs
+                 revisiting (real adaptive layout) before that SDK bump. -->
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

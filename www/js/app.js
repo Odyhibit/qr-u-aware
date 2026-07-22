@@ -303,6 +303,15 @@ function _computeSimpleVerdict(scan) {
         return { level: 'caution', icon: '⚠', text: 'Use Caution', sub: _simpleDomain(scan) };
     }
 
+    // GSB is the primary check — if it didn't actually complete, "Looks Safe"
+    // would overstate our confidence even when no other signal is bad.
+    if (scan.googleVerdict === 'Check failed') {
+        return { level: 'unreachable', icon: '?', text: 'Google Safe Browsing Check Failed', sub: _simpleDomain(scan) };
+    }
+    if (scan.googleVerdict === 'Partially checked') {
+        return { level: 'unreachable', icon: '?', text: 'Google Safe Browsing Partially Checked', sub: _simpleDomain(scan) };
+    }
+
     return { level: 'safe', icon: '✓', text: 'Looks Safe', sub: _simpleDomain(scan) };
 }
 
@@ -1606,15 +1615,16 @@ async function _callSafeBrowsing(url, apiKey) {
     return data.matches || [];
 }
 
+// Send only the identification headers for the platform we are actually
+// running on — each platform's key is restricted to its own app identity.
 function _safeBrowsingHeaders() {
     const cfg = window.QR_STEGO_CONFIG || {};
     const headers = { 'Content-Type': 'application/json' };
+    const platform = window.Capacitor?.getPlatform?.();
 
-    if (cfg.iosBundleId) {
+    if (platform === 'ios' && cfg.iosBundleId) {
         headers['X-Ios-Bundle-Identifier'] = cfg.iosBundleId;
-    }
-
-    if (cfg.androidPackageName && cfg.androidCertSha1) {
+    } else if (platform === 'android' && cfg.androidPackageName && cfg.androidCertSha1) {
         headers['X-Android-Package'] = cfg.androidPackageName;
         headers['X-Android-Cert'] = String(cfg.androidCertSha1).replace(/:/g, '').toUpperCase();
     }

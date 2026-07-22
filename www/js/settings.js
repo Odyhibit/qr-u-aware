@@ -17,7 +17,11 @@ function saveAdvancedMode(value) {
 }
 
 function getDefaultGsbApiKey() {
-    return String(window.QR_STEGO_CONFIG?.googleSafeBrowsingApiKey || '').trim();
+    const cfg = window.QR_STEGO_CONFIG || {};
+    const key = window.Capacitor?.getPlatform?.() === 'android' && cfg.googleSafeBrowsingApiKeyAndroid
+        ? cfg.googleSafeBrowsingApiKeyAndroid
+        : cfg.googleSafeBrowsingApiKey;
+    return String(key || '').trim();
 }
 
 async function initSettings() {
