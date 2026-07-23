@@ -18,8 +18,11 @@ function saveAdvancedMode(value) {
 
 function getDefaultGsbApiKey() {
     const cfg = window.QR_STEGO_CONFIG || {};
-    const key = window.Capacitor?.getPlatform?.() === 'android' && cfg.googleSafeBrowsingApiKeyAndroid
+    const platform = window.Capacitor?.getPlatform?.();
+    const key = platform === 'android' && cfg.googleSafeBrowsingApiKeyAndroid
         ? cfg.googleSafeBrowsingApiKeyAndroid
+        : platform === 'web' && cfg.googleSafeBrowsingApiKeyWeb
+        ? cfg.googleSafeBrowsingApiKeyWeb
         : cfg.googleSafeBrowsingApiKey;
     return String(key || '').trim();
 }

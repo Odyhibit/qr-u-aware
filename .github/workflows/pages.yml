@@ -38,7 +38,7 @@ jobs:
         run: |
           cat > www/js/secrets.js << EOF
           if (window.QR_STEGO_CONFIG) {
-              window.QR_STEGO_CONFIG.googleSafeBrowsingApiKey = '${GSB_WEB_API_KEY}';
+              window.QR_STEGO_CONFIG.googleSafeBrowsingApiKeyWeb = '${GSB_WEB_API_KEY}';
           }
           EOF
 
