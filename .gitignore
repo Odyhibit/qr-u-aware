@@ -19,3 +19,7 @@ android/local.properties
 
 # Capacitor
 dist/
+CLAUDE.md
+PREAMBLE.md
+.idea/
+.preamble/
